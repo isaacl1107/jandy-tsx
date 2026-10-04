@@ -31,6 +31,9 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
         self.client = client
         self.schedule_enabled = True
         self._last_applied: dict[str, Any] = {}
+        # True only after HA schedules send filtration ON. Manual / panel ON
+        # leaves this False so schedule end will not force the pump off.
+        self._schedule_owns_pump = False
         poll = entry.options.get(
             CONF_POLL_INTERVAL,
             entry.data.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL),
@@ -99,17 +102,16 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
         # Only control equipment that has its own schedule. Otherwise a heater
         # window would force the pool light / water feature off every poll.
         #
-        # Pump is ON-ONLY from schedules: never send filtration OFF. Idle HA
-        # schedules (and request_refresh after a manual ON) were turning the
-        # pump off again within ~10–15s. Panel-side TCX schedules (sh.*) still
-        # own their own on/off windows independently of HA.
-        pump_should_on = bool(desired["pump"]["on"]) and (
+        # Pump OFF is ownership-gated: only send filtration OFF when HA itself
+        # turned the pump on for this schedule window. Manual ON / panel ON
+        # never sets ownership, so idle-window refresh cannot yank them off.
+        pump_managed = (
             "pump" in managed
             or "heater" in managed
             or "water_feature" in managed
         )
-        if pump_should_on:
-            await self._maybe_set_pump(True, state, now)
+        if pump_managed:
+            await self._maybe_set_pump(bool(desired["pump"]["on"]), state, now)
 
         if "heater" in managed:
             await self._maybe_set_heater(desired["heater"], state, now)
@@ -121,29 +123,47 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
             )
 
     def mark_manual_pump(self, on: bool) -> None:
-        """Record a user toggle (kept for diagnostics / future schedule modes)."""
+        """User toggle — HA no longer owns this pump run for schedule OFF."""
+        self._schedule_owns_pump = False
         self._last_applied["pump"] = ("pump", "manual", bool(on))
 
     async def _maybe_set_pump(
         self, should_on: bool, state: TcxState, when: datetime
     ) -> None:
-        # Schedules must never turn the filter pump off — only ensure ON.
-        if not should_on:
-            _LOGGER.debug(
-                "Ignoring schedule pump-off at %s (HA schedules are ON-only)",
-                when.isoformat(),
-            )
-            return
+        if should_on:
+            key = ("pump", True)
+            if state.pump_on:
+                # Already running (manual, panel, or prior schedule ON). Do not
+                # claim ownership unless we already own this run.
+                self._last_applied["pump"] = key
+                return
 
-        key = ("pump", True)
-        if self._last_applied.get("pump") == key and state.pump_on:
-            return
-        if state.pump_on:
+            _LOGGER.info("Schedule enabling filter pump at %s", when.isoformat())
+            await self.client.async_set_filter_pump(True)
+            self._schedule_owns_pump = True
             self._last_applied["pump"] = key
             return
 
-        _LOGGER.info("Schedule enabling filter pump at %s", when.isoformat())
-        await self.client.async_set_filter_pump(True)
+        # Window idle — only OFF if HA started this pump run.
+        key = ("pump", False)
+        if not self._schedule_owns_pump:
+            _LOGGER.debug(
+                "Ignoring schedule pump-off at %s (HA did not start this run)",
+                when.isoformat(),
+            )
+            self._last_applied["pump"] = key
+            return
+        if not state.pump_on:
+            self._schedule_owns_pump = False
+            self._last_applied["pump"] = key
+            return
+
+        _LOGGER.info(
+            "Schedule disabling filter pump at %s (HA started this run)",
+            when.isoformat(),
+        )
+        await self.client.async_set_filter_pump(False)
+        self._schedule_owns_pump = False
         self._last_applied["pump"] = key
 
     async def _maybe_set_heater(
