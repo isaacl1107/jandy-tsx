@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from homeassistant.components.light import (
     ATTR_EFFECT,
     ColorMode,
@@ -16,7 +18,7 @@ from .const import DOMAIN
 from .coordinator import TcxCoordinator
 from .entity import TcxEntity
 
-# Common Jandy WaterColors program indexes used by iAquaLink.
+# Jandy WaterColors program names. Wire cmdClr/currClr index is 1-based.
 JANDY_EFFECTS = [
     "Alpine White",
     "Sky Blue",
@@ -52,24 +54,50 @@ class TcxPoolLight(TcxEntity, LightEntity):
 
     def __init__(self, coordinator: TcxCoordinator) -> None:
         super().__init__(coordinator, "pool_light")
-        self._attr_name = coordinator.data.light_name or "Pool light"
+        self._attr_name = (
+            (coordinator.data.light_name if coordinator.data else None)
+            or "Pool light"
+        )
+
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data
+        return bool(
+            self.coordinator.last_update_success
+            and data
+            and (data.light_available or data.light_key)
+        )
 
     @property
     def is_on(self) -> bool:
-        return self.coordinator.data.light_on
+        return bool(self.coordinator.data and self.coordinator.data.light_on)
 
     @property
     def effect(self) -> str | None:
+        if not self.coordinator.data:
+            return None
+        # Wire index is 1-based.
         idx = self.coordinator.data.light_color
-        if 0 <= idx < len(JANDY_EFFECTS):
-            return JANDY_EFFECTS[idx]
+        if 1 <= idx <= len(JANDY_EFFECTS):
+            return JANDY_EFFECTS[idx - 1]
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        data = self.coordinator.data
+        if not data:
+            return {}
+        return {
+            "aux_key": data.light_key,
+            "color_index": data.light_color,
+            "color_capable": data.light_is_color,
+        }
 
     async def async_turn_on(self, **kwargs) -> None:
         color = None
         effect = kwargs.get(ATTR_EFFECT)
         if effect and effect in JANDY_EFFECTS:
-            color = JANDY_EFFECTS.index(effect)
+            color = JANDY_EFFECTS.index(effect) + 1  # 1-based wire index
         await self.coordinator.client.async_set_light(True, color)
         await self.coordinator.async_request_refresh()
 

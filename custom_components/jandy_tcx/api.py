@@ -21,6 +21,7 @@ from .const import (
     ACTION_SET_HEAT_ENABLED,
     ACTION_SET_STATE,
     ACTION_SET_WATER_TEMP_SETPOINT,
+    ACTION_SET_ZIGBEE_STATE,
     ACTION_SUBSCRIBE,
     API_KEY,
     API_KEY_PROD,
@@ -30,7 +31,9 @@ from .const import (
     LOGIN_URL,
     NAMESPACE_AUTHORIZATION,
     NAMESPACE_FILTRATION,
+    NAMESPACE_PIB,
     NAMESPACE_TCX,
+    NAMESPACE_ZIGBEE,
     REFRESH_URL,
     SERVICE_AUTHORIZATION,
     SERVICE_STATE_CONTROLLER,
@@ -71,8 +74,9 @@ class TcxState:
     light_on: bool = False
     light_color: int = 0
     light_name: str = "Pool Light"
-    light_key: str = "aux1"
+    light_key: str | None = None
     light_is_color: bool = False
+    light_available: bool = False
     water_feature_on: bool = False
     water_feature_name: str = "Water feature"
     water_feature_key: str | None = None
@@ -100,6 +104,7 @@ class TcxState:
             "light_name": self.light_name,
             "light_key": self.light_key,
             "light_is_color": self.light_is_color,
+            "light_available": self.light_available,
             "water_feature_on": self.water_feature_on,
             "water_feature_name": self.water_feature_name,
             "water_feature_key": self.water_feature_key,
@@ -205,6 +210,7 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
             pass
 
     # Aux relays (auxN) and Zigbee aux (auxzN): water feature + pool light.
+    # Color-capable et values: JL / IB / PSS / HU (see TCX LightType).
     light_found = False
     for key, value in reported.items():
         if not key.startswith("aux") or not isinstance(value, dict):
@@ -218,17 +224,30 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
             state.water_feature_on = int(value.get("st") or 0) == 1
             state.water_feature_name = str(value.get("fr") or "Water feature")
             continue
-        is_color = app in {"POOL_LT", "POOL_LIGHT"} or et in {"JL", "IB", "HU"}
-        is_light = is_color or "light" in fr or "lamp" in fr
+        is_color = app in {"POOL_LT", "POOL_LIGHT"} or et in {
+            "JL",
+            "IB",
+            "PSS",
+            "HU",
+        }
+        is_light = is_color or et == "WL" or "light" in fr or "lamp" in fr
         if is_light:
-            # Prefer an explicit color-light match over a name-only hit.
-            if light_found and not is_color and state.light_is_color:
-                continue
+            # Prefer wired aux color lights over Zigbee / name-only matches.
+            if light_found:
+                if state.light_is_color and not key.startswith("auxz"):
+                    continue
+                if state.light_is_color and not is_color:
+                    continue
+                if not key.startswith("auxz") and state.light_key and state.light_key.startswith("auxz"):
+                    pass  # upgrade zigbee → wired
+                elif state.light_key and not state.light_key.startswith("auxz"):
+                    continue
             state.light_key = key
             state.light_on = int(value.get("st") or 0) == 1
             state.light_color = int(value.get("currClr") or value.get("cmdClr") or 0)
             state.light_name = str(value.get("fr") or "Pool Light")
             state.light_is_color = is_color or key.startswith("auxz")
+            state.light_available = True
             light_found = True
 
     swc = reported.get("swc0") or {}
@@ -341,6 +360,7 @@ class TcxClient:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._ws_task: asyncio.Task | None = None
         self._ws_lock = asyncio.Lock()
+        self._ws_auth_event = asyncio.Event()
         self._reported: dict[str, Any] = {}
         self._listeners: list[Callable[[TcxState], None]] = []
         self._mock_state = mock_reported(serial or "MOCKTCX01")
@@ -680,8 +700,9 @@ class TcxClient:
             raise TcxApiError(f"Shadow GET failed ({status}): {body}")
 
         reported = (body.get("state") or {}).get("reported") or {}
-        if isinstance(reported, dict):
-            self._reported = reported
+        if isinstance(reported, dict) and reported:
+            # Merge — never wipe WS-only keys (aux from pib0, auxz from zig, ecm…).
+            self._reported = {**self._reported, **reported}
             self._notify()
         return body
 
@@ -692,36 +713,49 @@ class TcxClient:
             return f"{self._user_id}|{uuid.uuid4().hex}"
         return uuid.uuid4().hex
 
-    async def async_connect_ws(self) -> None:
+    async def async_connect_ws(self, *, wait_for_auth: bool = True) -> None:
         if self.mock:
             return
+        freshly_connected = False
         async with self._ws_lock:
-            if self._ws and not self._ws.closed:
-                return
-            await self._ensure_token()
-            # Use the HA aiohttp session SSL context — never call
-            # ssl.create_default_context() on the event loop (blocking I/O).
-            headers = {
-                "Authorization": self._id_token or "",
-                "User-Agent": USER_AGENT,
-            }
-            self._ws = await self._session.ws_connect(
-                WS_URL,
-                headers=headers,
-                heartbeat=30,
-                autoping=True,
-            )
-            subscribe = {
-                "action": ACTION_SUBSCRIBE,
-                "version": 1,
-                "namespace": NAMESPACE_AUTHORIZATION,
-                "service": SERVICE_AUTHORIZATION,
-                "payload": {"userId": int(self._user_id or 0)},
-                "target": self.serial,
-            }
-            await self._ws.send_json(subscribe)
-            if self._ws_task is None or self._ws_task.done():
-                self._ws_task = asyncio.create_task(self._ws_receive_loop())
+            already_open = bool(self._ws and not self._ws.closed)
+            if not already_open:
+                await self._ensure_token()
+                self._ws_auth_event.clear()
+                # Use the HA aiohttp session SSL context — never call
+                # ssl.create_default_context() on the event loop (blocking I/O).
+                headers = {
+                    "Authorization": self._id_token or "",
+                    "User-Agent": USER_AGENT,
+                }
+                self._ws = await self._session.ws_connect(
+                    WS_URL,
+                    headers=headers,
+                    heartbeat=30,
+                    autoping=True,
+                )
+                subscribe = {
+                    "action": ACTION_SUBSCRIBE,
+                    "version": 1,
+                    "namespace": NAMESPACE_AUTHORIZATION,
+                    "service": SERVICE_AUTHORIZATION,
+                    "payload": {"userId": int(self._user_id or 0)},
+                    "target": self.serial,
+                }
+                await self._ws.send_json(subscribe)
+                if self._ws_task is None or self._ws_task.done():
+                    self._ws_task = asyncio.create_task(self._ws_receive_loop())
+                freshly_connected = True
+
+        # Authorization full-state carries aux/lights from pib0 + zig namespaces.
+        if wait_for_auth and freshly_connected and not self._ws_auth_event.is_set():
+            try:
+                await asyncio.wait_for(self._ws_auth_event.wait(), timeout=5.0)
+            except TimeoutError:
+                _LOGGER.warning(
+                    "TCX websocket Authorization state not received within 5s; "
+                    "light/aux discovery may be incomplete until the next push"
+                )
 
     async def _ws_receive_loop(self) -> None:
         assert self._ws is not None
@@ -760,9 +794,10 @@ class TcxClient:
                     self._notify()
                     return
             return
-        # Full Authorization payload replaces the cache; deltas merge.
+        # Authorization full-state replaces cache; streamer deltas merge.
         if frame.get("service") == SERVICE_AUTHORIZATION:
             self._reported = merged
+            self._ws_auth_event.set()
         else:
             self._reported.update(merged)
         self._notify()
@@ -851,31 +886,61 @@ class TcxClient:
         )
 
     async def async_set_light(self, on: bool, color: int | None = None) -> None:
-        state = self.get_state()
-        aux_key = state.light_key or "aux1"
-        delta: dict[str, Any] = {aux_key: {"st": 1 if on else 0}}
-        if color is not None:
-            delta[aux_key]["cmdClr"] = int(color)
+        """Toggle pool light.
 
-        # Color / PIB lights use setAuxLight; plain aux relays use setAuxState.
-        if state.light_is_color or aux_key.startswith("auxz"):
+        On/off is always ``setAuxState`` (wired aux) or ``setZigbeeState``
+        (auxz*). Color programs use ``setAuxLight`` with a 1-based index.
+        """
+        state = self.get_state()
+        aux_key = state.light_key
+        if not aux_key:
+            for key, value in state.raw.items():
+                if key.startswith("aux") and isinstance(value, dict):
+                    app = str(value.get("app") or "")
+                    et = str(value.get("et") or "")
+                    fr = str(value.get("fr") or "").lower()
+                    if (
+                        app in {"POOL_LT", "POOL_LIGHT"}
+                        or et in {"JL", "IB", "PSS", "HU", "WL"}
+                        or "light" in fr
+                        or "lamp" in fr
+                    ):
+                        aux_key = key
+                        break
+        if not aux_key:
+            raise TcxApiError(
+                "No pool light aux circuit discovered yet. "
+                "Wait for websocket Authorization state, then try again."
+            )
+
+        _LOGGER.info(
+            "TCX light %s via %s (color_index=%s)",
+            "on" if on else "off",
+            aux_key,
+            color,
+        )
+
+        # On/off: confirmed wire path is setAuxState / setZigbeeState (not setAuxLight).
+        if aux_key.startswith("auxz"):
             await self._send_command(
-                namespace="pib",
-                action=ACTION_SET_AUX_LIGHT,
-                delta=delta,
+                namespace=NAMESPACE_ZIGBEE,
+                action=ACTION_SET_ZIGBEE_STATE,
+                delta={aux_key: {"st": 1 if on else 0}},
             )
         else:
             await self._send_command(
                 namespace=NAMESPACE_TCX,
                 action=ACTION_SET_AUX_STATE,
-                delta=delta,
+                delta={aux_key: {"st": 1 if on else 0}},
             )
-            if on and color is not None:
-                await self._send_command(
-                    namespace="pib",
-                    action=ACTION_SET_AUX_LIGHT,
-                    delta={aux_key: {"cmdClr": int(color)}},
-                )
+
+        # Color is a separate PIB command; wire index is 1-based.
+        if on and color is not None and not aux_key.startswith("auxz"):
+            await self._send_command(
+                namespace=NAMESPACE_PIB,
+                action=ACTION_SET_AUX_LIGHT,
+                delta={aux_key: {"cmdClr": int(color)}},
+            )
 
     async def async_set_water_feature(self, on: bool) -> None:
         state = self.get_state()

@@ -31,6 +31,8 @@ DEFAULT_NAME = "Jandy TCX"
 NAMESPACE_TCX = "tcx"
 NAMESPACE_FILTRATION = "filtration"
 NAMESPACE_AUTHORIZATION = "authorization"
+NAMESPACE_PIB = "pib"
+NAMESPACE_ZIGBEE = "zigbee"
 SERVICE_AUTHORIZATION = "Authorization"
 SERVICE_STATE_CONTROLLER = "StateController"
 
@@ -40,6 +42,7 @@ ACTION_SET_HEAT_ENABLED = "setHeatEnabled"
 ACTION_SET_WATER_TEMP_SETPOINT = "setWaterTempSetpoint"
 ACTION_SET_AUX_STATE = "setAuxState"
 ACTION_SET_AUX_LIGHT = "setAuxLight"
+ACTION_SET_ZIGBEE_STATE = "setZigbeeState"
 ACTION_SET_STATE = "setState"
 
 # Temperatures on the wire are tenths of a degree Fahrenheit.
