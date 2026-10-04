@@ -67,9 +67,9 @@ class TcxHeaterClimate(TcxEntity, ClimateEntity):
         return HVACAction.IDLE
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        await self.coordinator.client.async_set_heater_enabled(
-            hvac_mode == HVACMode.HEAT
-        )
+        enabled = hvac_mode == HVACMode.HEAT
+        self.coordinator.mark_manual("heater", enabled)
+        await self.coordinator.client.async_set_heater_enabled(enabled)
         await self.coordinator.async_request_refresh()
 
     async def async_set_temperature(self, **kwargs) -> None:

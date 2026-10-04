@@ -48,14 +48,14 @@ class TcxPumpSwitch(TcxEntity, SwitchEntity):
         return self.coordinator.data.pump_on
 
     async def async_turn_on(self, **kwargs) -> None:
-        # Mark manual before refresh so an idle pump schedule cannot
-        # immediately force the pump back off (seen as On→Off in ~6s).
-        self.coordinator.mark_manual_pump(True)
+        # Mark manual before refresh so an idle schedule cannot immediately
+        # force the pump back off (seen as On→Off in ~6s).
+        self.coordinator.mark_manual("pump", True)
         await self.coordinator.client.async_set_filter_pump(True)
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
-        self.coordinator.mark_manual_pump(False)
+        self.coordinator.mark_manual("pump", False)
         await self.coordinator.client.async_set_filter_pump(False)
         await self.coordinator.async_request_refresh()
 
@@ -73,10 +73,12 @@ class TcxHeaterSwitch(TcxEntity, SwitchEntity):
         return self.coordinator.data.heater_enabled
 
     async def async_turn_on(self, **kwargs) -> None:
+        self.coordinator.mark_manual("heater", True)
         await self.coordinator.client.async_set_heater_enabled(True)
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
+        self.coordinator.mark_manual("heater", False)
         await self.coordinator.client.async_set_heater_enabled(False)
         await self.coordinator.async_request_refresh()
 
@@ -128,9 +130,11 @@ class TcxWaterFeatureSwitch(TcxEntity, SwitchEntity):
         return self.coordinator.data.water_feature_on
 
     async def async_turn_on(self, **kwargs) -> None:
+        self.coordinator.mark_manual("water_feature", True)
         await self.coordinator.client.async_set_water_feature(True)
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
+        self.coordinator.mark_manual("water_feature", False)
         await self.coordinator.client.async_set_water_feature(False)
         await self.coordinator.async_request_refresh()

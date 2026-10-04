@@ -93,9 +93,11 @@ class TcxPoolLight(TcxEntity, LightEntity):
         effect = kwargs.get(ATTR_EFFECT)
         if effect and effect in JANDY_EFFECTS:
             color = JANDY_EFFECTS.index(effect) + 1  # 1-based wire index
+        self.coordinator.mark_manual("light", True)
         await self.coordinator.client.async_set_light(True, color)
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
+        self.coordinator.mark_manual("light", False)
         await self.coordinator.client.async_set_light(False)
         await self.coordinator.async_request_refresh()

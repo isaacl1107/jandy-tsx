@@ -26,7 +26,7 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 
 ## Install on your Home Assistant (Raspberry Pi)
 
-Current version: **1.4.4**
+Current version: **1.4.5**
 
 ### Option A — HACS (recommended)
 
@@ -38,7 +38,10 @@ Current version: **1.4.4**
 6. **Settings → Devices & services → Add integration → Jandy AquaLink TCX**
 7. Sign in with your iAquaLink / Jandy email + password
 
-To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.4.4"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.4.5"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+
+**v1.4.5**
+- Ownership-gated schedule OFF for **heater, filter pump, pool light, and water feature**: HA sends OFF at window end only if HA turned that equipment ON for the run. Manual toggles clear ownership.
 
 **v1.4.4**
 - Filter pump schedules: HA turns the pump **OFF at window end only if HA turned it ON** for that run. Manual ON (or pump already running from the panel) is left alone when the HA window ends.
@@ -109,7 +112,7 @@ Notes:
 - Times use your Home Assistant timezone
 - Overnight windows work (for example 22:00 → 06:00)
 - When a heater or water-feature schedule is active, the filter pump is forced on (safe interlock)
-- Filter pump OFF at schedule end only if HA started that pump run (manual ON is not overwritten)
+- Heater / pump / light / water-feature OFF at schedule end only if HA started that run (manual ON is not overwritten)
 - Toggle **Auto schedule** off for full manual control
 - Upgrading to **v1.4.3+** auto-removes the old stock sample schedules on restart; any schedules you added yourself are kept
 
