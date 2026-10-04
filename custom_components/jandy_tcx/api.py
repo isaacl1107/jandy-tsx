@@ -617,29 +617,39 @@ class TcxClient:
         if not self.serial:
             raise TcxApiError("No TCX serial configured")
         token = await self._ensure_token()
+        if not self._user_id:
+            raise TcxApiError("Missing user id for shadow signature")
+
+        # TCX shadow GET requires signature = HMAC-SHA1(serial.upper,user_id).
         url = SHADOW_URL.format(serial=self.serial)
+        params = {
+            "signature": self._sign(
+                [self.serial.upper(), str(self._user_id)]
+            )
+        }
         headers = {
             "Authorization": token,
             "Accept": "application/json",
             "User-Agent": USER_AGENT,
         }
         timeout = aiohttp.ClientTimeout(total=30)
-        async with self._session.get(url, headers=headers, timeout=timeout) as resp:
-            if resp.status in (401, 403):
-                self._id_token = None
-                token = await self._ensure_token()
-                headers["Authorization"] = token
-                async with self._session.get(
-                    url, headers=headers, timeout=timeout
-                ) as retry:
-                    if retry.status >= 400:
-                        raise TcxApiError(f"Shadow GET failed ({retry.status})")
-                    body = await retry.json(content_type=None)
-            elif resp.status >= 400:
-                text = await resp.text()
-                raise TcxApiError(f"Shadow GET failed ({resp.status}): {text}")
-            else:
-                body = await resp.json(content_type=None)
+
+        async def _do_get(auth_token: str) -> tuple[int, Any]:
+            req_headers = {**headers, "Authorization": auth_token}
+            async with self._session.get(
+                url, params=params, headers=req_headers, timeout=timeout
+            ) as resp:
+                if resp.status >= 400:
+                    return resp.status, await resp.text()
+                return resp.status, await resp.json(content_type=None)
+
+        status, body = await _do_get(token)
+        if status in (401, 403):
+            self._id_token = None
+            token = await self._ensure_token()
+            status, body = await _do_get(token)
+        if status >= 400:
+            raise TcxApiError(f"Shadow GET failed ({status}): {body}")
 
         reported = (body.get("state") or {}).get("reported") or {}
         if isinstance(reported, dict):

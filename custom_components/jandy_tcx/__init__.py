@@ -9,7 +9,9 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import TcxClient
+from homeassistant.exceptions import ConfigEntryNotReady
+
+from .api import TcxApiError, TcxAuthError, TcxClient
 from .const import (
     CONF_EMAIL,
     CONF_MOCK,
@@ -35,9 +37,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         serial=entry.data[CONF_SERIAL],
         mock=bool(entry.data.get(CONF_MOCK, False)),
     )
-    await client.async_login()
-    if not client.mock:
-        await client.async_get_shadow()
+    try:
+        await client.async_login()
+        if not client.mock:
+            await client.async_get_shadow()
+    except TcxAuthError as err:
+        raise ConfigEntryNotReady(f"TCX authentication failed: {err}") from err
+    except TcxApiError as err:
+        # Prefer websocket bootstrap over failing setup on a transient REST issue.
+        _LOGGER.warning("Initial TCX shadow fetch failed (%s); trying websocket", err)
+        try:
+            await client.async_connect_ws()
+        except Exception as ws_err:  # noqa: BLE001
+            raise ConfigEntryNotReady(
+                f"TCX cloud unavailable: {err}"
+            ) from ws_err
 
     coordinator = TcxCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
