@@ -62,6 +62,11 @@ def slot_from_dict(data: dict[str, Any]) -> ScheduleSlot:
     )
 
 
+def managed_targets(slots: list[ScheduleSlot]) -> set[ScheduleTarget]:
+    """Targets that have at least one enabled schedule slot."""
+    return {slot.target for slot in slots if slot.enabled}
+
+
 def slots_from_config(raw: list[dict[str, Any]] | None) -> list[ScheduleSlot]:
     if not raw:
         return []

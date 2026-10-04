@@ -13,7 +13,7 @@ from homeassistant.util import dt as dt_util
 
 from .api import TcxApiError, TcxAuthError, TcxClient, TcxState
 from .const import CONF_POLL_INTERVAL, CONF_SCHEDULES, DEFAULT_POLL_INTERVAL, DOMAIN
-from .schedule import desired_states, slots_from_config
+from .schedule import desired_states, managed_targets, slots_from_config
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,12 +75,27 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
             return
         now = dt_util.now()
         desired = desired_states(slots, now)
-        await self._maybe_set_pump(desired["pump"]["on"], state, now)
-        await self._maybe_set_heater(desired["heater"], state, now)
-        await self._maybe_set_light(desired["light"]["on"], state, now)
-        await self._maybe_set_water_feature(
-            desired["water_feature"]["on"], state, now
-        )
+        managed = managed_targets(slots)
+
+        # Only control equipment that has its own schedule. Otherwise a heater
+        # window would force the pool light / water feature off every poll.
+        if "pump" in managed:
+            await self._maybe_set_pump(desired["pump"]["on"], state, now)
+        elif desired["pump"]["on"] and (
+            "heater" in managed or "water_feature" in managed
+        ):
+            # Safety interlock: force pump on while heater/WF schedule is active,
+            # but never force the pump off when it is not itself scheduled.
+            await self._maybe_set_pump(True, state, now)
+
+        if "heater" in managed:
+            await self._maybe_set_heater(desired["heater"], state, now)
+        if "light" in managed:
+            await self._maybe_set_light(desired["light"]["on"], state, now)
+        if "water_feature" in managed:
+            await self._maybe_set_water_feature(
+                desired["water_feature"]["on"], state, now
+            )
 
     async def _maybe_set_pump(
         self, should_on: bool, state: TcxState, when: datetime

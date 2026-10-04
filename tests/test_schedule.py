@@ -5,6 +5,7 @@ from datetime import datetime, time
 from custom_components.jandy_tcx.schedule import (
     ScheduleSlot,
     desired_states,
+    managed_targets,
     next_transition,
     slots_from_config,
 )
@@ -98,3 +99,19 @@ def test_water_feature_forces_pump():
     noon = datetime(2026, 10, 5, 12, 30)
     assert desired_states(slots, noon)["water_feature"]["on"] is True
     assert desired_states(slots, noon)["pump"]["on"] is True
+
+
+def test_managed_targets_only_listed_equipment():
+    slots = [
+        ScheduleSlot(
+            id="h1",
+            target="heater",
+            days=(0,),
+            start=time(10, 0),
+            end=time(18, 0),
+            setpoint_f=84,
+        )
+    ]
+    assert managed_targets(slots) == {"heater"}
+    # Light is not managed — schedules must not force it off.
+    assert "light" not in managed_targets(slots)

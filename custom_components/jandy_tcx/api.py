@@ -72,6 +72,7 @@ class TcxState:
     light_color: int = 0
     light_name: str = "Pool Light"
     light_key: str = "aux1"
+    light_is_color: bool = False
     water_feature_on: bool = False
     water_feature_name: str = "Water feature"
     water_feature_key: str | None = None
@@ -98,6 +99,7 @@ class TcxState:
             "light_color": self.light_color,
             "light_name": self.light_name,
             "light_key": self.light_key,
+            "light_is_color": self.light_is_color,
             "water_feature_on": self.water_feature_on,
             "water_feature_name": self.water_feature_name,
             "water_feature_key": self.water_feature_key,
@@ -202,9 +204,10 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
         except (TypeError, ValueError):
             pass
 
-    # Aux relays: water feature (WF) and pool light (POOL_LT / color light types).
+    # Aux relays (auxN) and Zigbee aux (auxzN): water feature + pool light.
+    light_found = False
     for key, value in reported.items():
-        if not key.startswith("aux") or key.startswith("auxz") or not isinstance(value, dict):
+        if not key.startswith("aux") or not isinstance(value, dict):
             continue
         app = str(value.get("app") or "")
         et = str(value.get("et") or "")
@@ -215,18 +218,18 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
             state.water_feature_on = int(value.get("st") or 0) == 1
             state.water_feature_name = str(value.get("fr") or "Water feature")
             continue
-        if app in {"POOL_LT", "POOL_LIGHT"} or et in {"JL", "IB", "HU"}:
+        is_color = app in {"POOL_LT", "POOL_LIGHT"} or et in {"JL", "IB", "HU"}
+        is_light = is_color or "light" in fr or "lamp" in fr
+        if is_light:
+            # Prefer an explicit color-light match over a name-only hit.
+            if light_found and not is_color and state.light_is_color:
+                continue
             state.light_key = key
             state.light_on = int(value.get("st") or 0) == 1
             state.light_color = int(value.get("currClr") or value.get("cmdClr") or 0)
             state.light_name = str(value.get("fr") or "Pool Light")
-
-    for key in ("auxz0",):
-        zig = reported.get(key)
-        if isinstance(zig, dict) and "st" in zig and state.light_key == "aux1":
-            state.light_key = key
-            state.light_on = int(zig.get("st") or 0) == 1
-            state.light_name = str(zig.get("fr") or "Pool Light")
+            state.light_is_color = is_color or key.startswith("auxz")
+            light_found = True
 
     swc = reported.get("swc0") or {}
     if isinstance(swc, dict) and swc.get("swc") is not None:
@@ -851,17 +854,28 @@ class TcxClient:
         state = self.get_state()
         aux_key = state.light_key or "aux1"
         delta: dict[str, Any] = {aux_key: {"st": 1 if on else 0}}
-        await self._send_command(
-            namespace=NAMESPACE_TCX,
-            action=ACTION_SET_AUX_STATE,
-            delta=delta,
-        )
-        if on and color is not None:
+        if color is not None:
+            delta[aux_key]["cmdClr"] = int(color)
+
+        # Color / PIB lights use setAuxLight; plain aux relays use setAuxState.
+        if state.light_is_color or aux_key.startswith("auxz"):
             await self._send_command(
                 namespace="pib",
                 action=ACTION_SET_AUX_LIGHT,
-                delta={aux_key: {"cmdClr": int(color)}},
+                delta=delta,
             )
+        else:
+            await self._send_command(
+                namespace=NAMESPACE_TCX,
+                action=ACTION_SET_AUX_STATE,
+                delta=delta,
+            )
+            if on and color is not None:
+                await self._send_command(
+                    namespace="pib",
+                    action=ACTION_SET_AUX_LIGHT,
+                    delta={aux_key: {"cmdClr": int(color)}},
+                )
 
     async def async_set_water_feature(self, on: bool) -> None:
         state = self.get_state()

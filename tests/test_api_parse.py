@@ -16,6 +16,7 @@ def test_parse_mock_reported():
     assert state.water_feature_key == "aux0"
     assert state.water_feature_on is False
     assert state.light_key == "aux1"
+    assert state.light_is_color is True
 
 
 def test_parse_tenths_and_heater_running():

@@ -26,15 +26,19 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 
 ## Install on your Home Assistant (Raspberry Pi)
 
+Current version: **1.3.2**
+
 ### Option A — HACS (recommended)
 
 1. Install [HACS](https://hacs.xyz/) if you do not have it.
 2. **HACS → Integrations → ⋮ → Custom repositories**
-3. Add this repository URL, category **Integration**
-4. Find **Jandy AquaLink TCX** → **Download**
+3. Add `https://github.com/isaacl1107/jandy-tsx`, category **Integration**
+4. Find **Jandy AquaLink TCX** → **Download** (or **Redownload** → pick latest)
 5. **Restart Home Assistant**
 6. **Settings → Devices & services → Add integration → Jandy AquaLink TCX**
 7. Sign in with your iAquaLink / Jandy email + password
+
+To confirm the update took effect: **Settings → Devices & services → Jandy AquaLink TCX → ⋮ → Download diagnostics** (or check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.3.2"`). An old SSL warning mentioning `ssl.create_default_context()` means HA is still running a previous copy — redownload and restart again.
 
 ### Option B — Manual copy
 
