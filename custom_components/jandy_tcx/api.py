@@ -7,7 +7,6 @@ import hashlib
 import hmac
 import json
 import logging
-import ssl
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -697,7 +696,8 @@ class TcxClient:
             if self._ws and not self._ws.closed:
                 return
             await self._ensure_token()
-            ssl_context = ssl.create_default_context()
+            # Use the HA aiohttp session SSL context — never call
+            # ssl.create_default_context() on the event loop (blocking I/O).
             headers = {
                 "Authorization": self._id_token or "",
                 "User-Agent": USER_AGENT,
@@ -705,7 +705,6 @@ class TcxClient:
             self._ws = await self._session.ws_connect(
                 WS_URL,
                 headers=headers,
-                ssl=ssl_context,
                 heartbeat=30,
                 autoping=True,
             )
