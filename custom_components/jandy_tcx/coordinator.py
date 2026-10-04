@@ -98,13 +98,17 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
 
         # Only control equipment that has its own schedule. Otherwise a heater
         # window would force the pool light / water feature off every poll.
-        if "pump" in managed:
-            await self._maybe_set_pump(desired["pump"]["on"], state, now)
-        elif desired["pump"]["on"] and (
-            "heater" in managed or "water_feature" in managed
-        ):
-            # Safety interlock: force pump on while heater/WF schedule is active,
-            # but never force the pump off when it is not itself scheduled.
+        #
+        # Pump is ON-ONLY from schedules: never send filtration OFF. Idle HA
+        # schedules (and request_refresh after a manual ON) were turning the
+        # pump off again within ~10–15s. Panel-side TCX schedules (sh.*) still
+        # own their own on/off windows independently of HA.
+        pump_should_on = bool(desired["pump"]["on"]) and (
+            "pump" in managed
+            or "heater" in managed
+            or "water_feature" in managed
+        )
+        if pump_should_on:
             await self._maybe_set_pump(True, state, now)
 
         if "heater" in managed:
@@ -117,45 +121,29 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
             )
 
     def mark_manual_pump(self, on: bool) -> None:
-        """Record a user toggle so idle schedules do not immediately fight it."""
+        """Record a user toggle (kept for diagnostics / future schedule modes)."""
         self._last_applied["pump"] = ("pump", "manual", bool(on))
 
     async def _maybe_set_pump(
         self, should_on: bool, state: TcxState, when: datetime
     ) -> None:
-        key = ("pump", should_on)
-        prev = self._last_applied.get("pump")
-        if prev == key and state.pump_on == should_on:
-            return
-        if state.pump_on == should_on:
-            # Keep a prior manual marker so an idle schedule cannot force-off
-            # a pump the user just enabled outside the schedule window.
-            if not (
-                isinstance(prev, tuple)
-                and len(prev) == 3
-                and prev[0] == "pump"
-                and prev[1] == "manual"
-            ):
-                self._last_applied["pump"] = key
-            return
-
-        # Outside an active pump window, desired is False. Only auto-off when
-        # *this* schedule previously turned the pump on — never yank a manual
-        # ON (activity log showed On→2500 RPM→Off within ~6s from that fight).
-        if not should_on and prev != ("pump", True):
+        # Schedules must never turn the filter pump off — only ensure ON.
+        if not should_on:
             _LOGGER.debug(
-                "Skipping schedule pump-off at %s (prev=%s manual_or_idle)",
+                "Ignoring schedule pump-off at %s (HA schedules are ON-only)",
                 when.isoformat(),
-                prev,
             )
             return
 
-        _LOGGER.info(
-            "Schedule %s filter pump at %s",
-            "enabling" if should_on else "disabling",
-            when.isoformat(),
-        )
-        await self.client.async_set_filter_pump(should_on)
+        key = ("pump", True)
+        if self._last_applied.get("pump") == key and state.pump_on:
+            return
+        if state.pump_on:
+            self._last_applied["pump"] = key
+            return
+
+        _LOGGER.info("Schedule enabling filter pump at %s", when.isoformat())
+        await self.client.async_set_filter_pump(True)
         self._last_applied["pump"] = key
 
     async def _maybe_set_heater(
