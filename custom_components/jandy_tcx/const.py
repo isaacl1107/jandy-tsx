@@ -5,13 +5,17 @@ from __future__ import annotations
 DOMAIN = "jandy_tcx"
 
 # Public Zodiac / iAquaLink cloud endpoints used by the official app.
+# NB07 is the classic iAquaLink key; NB11 is used by some Zodiac/EU apps.
 API_KEY = "EOOEMOW4YR6QNB07"
+API_KEY_PROD = "EOOEMOW4YR6QNB11"
+API_SIGNING_KEY = "cj7iYKjiKxOqiLcN65PffA"
 LOGIN_URL = "https://prod.zodiac-io.com/users/v1/login"
 REFRESH_URL = "https://prod.zodiac-io.com/users/v1/refresh"
 DEVICES_URL = "https://r-api.iaqualink.net/v2/devices.json"
+DEVICES_URL_LEGACY = "https://r-api.iaqualink.net/devices.json"
 SHADOW_URL = "https://prod.zodiac-io.com/devices/v2/{serial}/shadow"
 WS_URL = "wss://prod-socket.zodiac-io.com/devices"
-USER_AGENT = "iAqualink/934 CFNetwork/3826.500.131 Darwin/24.5.0"
+USER_AGENT = "okhttp/3.14.7"
 
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"

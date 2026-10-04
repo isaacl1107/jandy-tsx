@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import ssl
@@ -22,7 +24,10 @@ from .const import (
     ACTION_SET_WATER_TEMP_SETPOINT,
     ACTION_SUBSCRIBE,
     API_KEY,
+    API_KEY_PROD,
+    API_SIGNING_KEY,
     DEVICES_URL,
+    DEVICES_URL_LEGACY,
     LOGIN_URL,
     NAMESPACE_AUTHORIZATION,
     NAMESPACE_FILTRATION,
@@ -333,44 +338,112 @@ class TcxClient:
             self._reported = dict(self._mock_state)
             return {"mock": True, "id": "0"}
 
-        payload = {
-            "api_key": API_KEY,
-            "email": self._email,
-            "password": self._password,
-        }
+        email = (self._email or "").strip()
+        password = self._password or ""
+        if not email or not password:
+            raise TcxAuthError("Email and password are required")
+
+        # Vendors/clients disagree on the key field name and which api key to
+        # send. Try the combinations known to work across iAquaLink apps.
+        attempts: list[tuple[str, str]] = [
+            ("api_key", API_KEY),
+            ("api_key", API_KEY_PROD),
+            ("apiKey", API_KEY),
+            ("apikey", API_KEY),
+            ("apiKey", API_KEY_PROD),
+            ("apikey", API_KEY_PROD),
+        ]
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": USER_AGENT,
         }
-        async with self._session.post(
-            LOGIN_URL, json=payload, headers=headers, timeout=30
-        ) as resp:
-            body = await resp.json(content_type=None)
-            if resp.status in (401, 403):
-                raise TcxAuthError(f"Login rejected ({resp.status})")
-            if resp.status >= 400:
-                raise TcxApiError(f"Login failed ({resp.status}): {body}")
+        timeout = aiohttp.ClientTimeout(total=30)
+        last_status: int | None = None
+        last_body: Any = None
 
-        oauth = body.get("userPoolOAuth") or {}
-        token = oauth.get("IdToken")
-        if not token:
-            raise TcxAuthError("Login response missing IdToken")
-        self._id_token = token
-        self._auth_token = body.get("authentication_token")
-        self._user_id = str(body.get("id"))
-        self._refresh_token = oauth.get("RefreshToken")
-        self._app_client_id = (
-            oauth.get("appClientId")
-            or body.get("appClientId")
-            or oauth.get("ClientId")
+        for key_field, api_key in attempts:
+            payload = {
+                key_field: api_key,
+                "email": email,
+                "password": password,
+            }
+            try:
+                async with self._session.post(
+                    LOGIN_URL, json=payload, headers=headers, timeout=timeout
+                ) as resp:
+                    last_status = resp.status
+                    try:
+                        body = await resp.json(content_type=None)
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError, ValueError):
+                        body = await resp.text()
+                    last_body = body
+                    if resp.status in (401, 403):
+                        _LOGGER.debug(
+                            "Login attempt %s/…%s rejected (%s)",
+                            key_field,
+                            api_key[-4:],
+                            resp.status,
+                        )
+                        continue
+                    if resp.status >= 400:
+                        _LOGGER.debug(
+                            "Login attempt %s/…%s failed (%s): %s",
+                            key_field,
+                            api_key[-4:],
+                            resp.status,
+                            body,
+                        )
+                        continue
+            except (aiohttp.ClientError, TimeoutError) as err:
+                raise TcxApiError(f"Login transport error: {err}") from err
+
+            if not isinstance(body, dict):
+                continue
+
+            oauth = body.get("userPoolOAuth") or {}
+            token = oauth.get("IdToken")
+            auth_token = body.get("authentication_token")
+            user_id = body.get("id")
+            if not token or not auth_token or user_id is None:
+                _LOGGER.debug(
+                    "Login response missing auth fields (keys=%s)",
+                    list(body.keys()),
+                )
+                continue
+
+            self._id_token = token
+            self._auth_token = auth_token
+            self._user_id = str(user_id)
+            self._refresh_token = oauth.get("RefreshToken")
+            self._app_client_id = (
+                oauth.get("appClientId")
+                or body.get("appClientId")
+                or oauth.get("ClientId")
+            )
+            try:
+                expires_in = int(oauth.get("ExpiresIn", 3600))
+            except (TypeError, ValueError):
+                expires_in = 3600
+            self._token_expiry = time.monotonic() + max(60, expires_in - 300)
+            _LOGGER.info(
+                "Zodiac login OK with %s/…%s for %s",
+                key_field,
+                api_key[-4:],
+                email,
+            )
+            return body
+
+        _LOGGER.warning(
+            "Zodiac login failed for %s (last_status=%s body=%s)",
+            email,
+            last_status,
+            last_body if not isinstance(last_body, dict) else list(last_body.keys()),
         )
-        try:
-            expires_in = int(oauth.get("ExpiresIn", 3600))
-        except (TypeError, ValueError):
-            expires_in = 3600
-        self._token_expiry = time.monotonic() + max(60, expires_in - 300)
-        return body
+        raise TcxAuthError(
+            f"Login rejected (status={last_status}). "
+            "Use the same email/password as the iAquaLink mobile app."
+        )
 
     async def _ensure_token(self) -> str:
         if self.mock:
@@ -394,7 +467,10 @@ class TcxClient:
             "User-Agent": USER_AGENT,
         }
         async with self._session.post(
-            REFRESH_URL, json=payload, headers=headers, timeout=30
+            REFRESH_URL,
+            json=payload,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
             body = await resp.json(content_type=None)
             if resp.status in (401, 403):
@@ -413,7 +489,89 @@ class TcxClient:
             expires_in = 3600
         self._token_expiry = time.monotonic() + max(60, expires_in - 300)
 
-    async def async_list_tcx_devices(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _sign(parts: list[str]) -> str:
+        message = ",".join(parts)
+        return hmac.new(
+            API_SIGNING_KEY.encode(), message.encode(), hashlib.sha1
+        ).hexdigest()
+
+    async def _async_fetch_devices_signed(self) -> list[dict[str, Any]]:
+        """Modern iAquaLink device list (signed + Bearer IdToken)."""
+        await self._ensure_token()
+        timestamp = str(int(time.time()))
+        signature = self._sign([str(self._user_id), timestamp])
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+            "api_key": API_KEY,
+            "Authorization": f"Bearer {self._id_token}",
+        }
+        params = {
+            "user_id": self._user_id,
+            "signature": signature,
+            "timestamp": timestamp,
+        }
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with self._session.get(
+            DEVICES_URL, params=params, headers=headers, timeout=timeout
+        ) as resp:
+            text = await resp.text()
+            if resp.status in (401, 403):
+                raise TcxAuthError(f"Device list unauthorized ({resp.status})")
+            if resp.status >= 400:
+                raise TcxApiError(f"Device list failed ({resp.status}): {text[:200]}")
+            try:
+                body = json.loads(text)
+            except json.JSONDecodeError as err:
+                raise TcxApiError("Device list returned non-JSON") from err
+        if isinstance(body, list):
+            return [item for item in body if isinstance(item, dict)]
+        if isinstance(body, dict):
+            devices = body.get("devices", [])
+            if isinstance(devices, list):
+                return [item for item in devices if isinstance(item, dict)]
+        return []
+
+    async def _async_fetch_devices_legacy(self) -> list[dict[str, Any]]:
+        """Legacy devices.json using authentication_token query params."""
+        await self._ensure_token()
+        params = {
+            "api_key": API_KEY,
+            "authentication_token": self._auth_token,
+            "user_id": self._user_id,
+        }
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+            "Authorization": self._id_token or "",
+        }
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with self._session.get(
+            DEVICES_URL_LEGACY, params=params, headers=headers, timeout=timeout
+        ) as resp:
+            text = await resp.text()
+            if resp.status in (401, 403):
+                raise TcxAuthError(f"Legacy device list unauthorized ({resp.status})")
+            if resp.status >= 400:
+                raise TcxApiError(
+                    f"Legacy device list failed ({resp.status}): {text[:200]}"
+                )
+            try:
+                body = json.loads(text)
+            except json.JSONDecodeError as err:
+                raise TcxApiError("Legacy device list returned non-JSON") from err
+        if isinstance(body, list):
+            return [item for item in body if isinstance(item, dict)]
+        if isinstance(body, dict):
+            devices = body.get("devices", [])
+            if isinstance(devices, list):
+                return [item for item in devices if isinstance(item, dict)]
+        return []
+
+    async def async_list_devices(self) -> list[dict[str, Any]]:
+        """Return all devices on the account."""
         if self.mock:
             return [
                 {
@@ -423,34 +581,33 @@ class TcxClient:
                 }
             ]
 
-        await self._ensure_token()
-        params = {
-            "api_key": API_KEY,
-            "authentication_token": self._auth_token,
-            "user_id": self._user_id,
-        }
-        headers = {
-            "Accept": "application/json",
-            "Authorization": self._id_token or "",
-            "User-Agent": USER_AGENT,
-        }
-        async with self._session.get(
-            DEVICES_URL, params=params, headers=headers, timeout=30
-        ) as resp:
-            body = await resp.json(content_type=None)
-            if resp.status in (401, 403):
-                raise TcxAuthError("Device list unauthorized")
-            if resp.status >= 400:
-                raise TcxApiError(f"Device list failed ({resp.status})")
+        try:
+            return await self._async_fetch_devices_signed()
+        except (TcxAuthError, TcxApiError) as err:
+            _LOGGER.warning("Signed device list failed (%s); trying legacy", err)
+            return await self._async_fetch_devices_legacy()
 
-        devices = body if isinstance(body, list) else body.get("devices", [])
-        return [
+    async def async_list_tcx_devices(self) -> list[dict[str, Any]]:
+        devices = await self.async_list_devices()
+        tcx = [
             device
             for device in devices
             if isinstance(device, dict)
             and str(device.get("device_type", "")).lower() == "tcx"
             and device.get("serial_number")
         ]
+        if not tcx and devices:
+            types = sorted(
+                {
+                    str(device.get("device_type"))
+                    for device in devices
+                    if isinstance(device, dict) and device.get("device_type")
+                }
+            )
+            _LOGGER.warning(
+                "No TCX controllers found; account device types: %s", types
+            )
+        return tcx
 
     async def async_get_shadow(self) -> dict[str, Any]:
         if self.mock:
@@ -466,13 +623,14 @@ class TcxClient:
             "Accept": "application/json",
             "User-Agent": USER_AGENT,
         }
-        async with self._session.get(url, headers=headers, timeout=30) as resp:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with self._session.get(url, headers=headers, timeout=timeout) as resp:
             if resp.status in (401, 403):
                 self._id_token = None
                 token = await self._ensure_token()
                 headers["Authorization"] = token
                 async with self._session.get(
-                    url, headers=headers, timeout=30
+                    url, headers=headers, timeout=timeout
                 ) as retry:
                     if retry.status >= 400:
                         raise TcxApiError(f"Shadow GET failed ({retry.status})")

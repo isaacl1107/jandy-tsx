@@ -18,9 +18,9 @@
       }
     },
     "error": {
-      "invalid_auth": "Invalid email or password",
+      "invalid_auth": "Login rejected by Zodiac/iAquaLink. Use the exact email and password from the iAquaLink app (not your Home Assistant password).",
       "cannot_connect": "Could not reach Zodiac / iAquaLink cloud",
-      "no_devices": "No AquaLink TCX controllers found on this account"
+      "no_devices": "Logged in, but no AquaLink TCX controller was found on this account"
     },
     "abort": {
       "already_configured": "This TCX controller is already configured"

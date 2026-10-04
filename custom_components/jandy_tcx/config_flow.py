@@ -65,19 +65,45 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             try:
                 await client.async_login()
-                self._devices = await client.async_list_tcx_devices()
-            except TcxAuthError:
+            except TcxAuthError as err:
+                _LOGGER.warning("TCX login failed: %s", err)
                 errors["base"] = "invalid_auth"
-            except (TcxApiError, aiohttp.ClientError, TimeoutError) as err:
-                _LOGGER.warning("TCX connection failed: %s", err)
+            except (TcxApiError, aiohttp.ClientError, TimeoutError, ValueError) as err:
+                _LOGGER.warning("TCX login connection failed: %s", err)
                 errors["base"] = "cannot_connect"
             else:
-                if not self._devices:
-                    errors["base"] = "no_devices"
-                elif len(self._devices) == 1:
-                    return await self._async_create_from_device(self._devices[0])
+                try:
+                    all_devices = await client.async_list_devices()
+                except TcxAuthError as err:
+                    _LOGGER.warning("TCX device list unauthorized: %s", err)
+                    errors["base"] = "invalid_auth"
+                except (TcxApiError, aiohttp.ClientError, TimeoutError) as err:
+                    _LOGGER.warning("TCX device list failed: %s", err)
+                    errors["base"] = "cannot_connect"
                 else:
-                    return await self.async_step_device()
+                    self._devices = [
+                        device
+                        for device in all_devices
+                        if isinstance(device, dict)
+                        and str(device.get("device_type", "")).lower() == "tcx"
+                        and device.get("serial_number")
+                    ]
+                    if not self._devices:
+                        types = sorted(
+                            {
+                                str(d.get("device_type"))
+                                for d in all_devices
+                                if isinstance(d, dict) and d.get("device_type")
+                            }
+                        )
+                        _LOGGER.warning(
+                            "No TCX devices on account (found types=%s)", types
+                        )
+                        errors["base"] = "no_devices"
+                    elif len(self._devices) == 1:
+                        return await self._async_create_from_device(self._devices[0])
+                    else:
+                        return await self.async_step_device()
 
         return self.async_show_form(
             step_id="user",
