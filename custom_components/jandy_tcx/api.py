@@ -414,6 +414,7 @@ class TcxClient:
         self._ws_lock = asyncio.Lock()
         self._ws_auth_event = asyncio.Event()
         self._ws_debug_frames: list[dict[str, Any]] = []
+        self._session_client_token: str | None = None
         self._reported: dict[str, Any] = {}
         self._listeners: list[Callable[[TcxState], None]] = []
         self._mock_state = mock_reported(serial or "MOCKTCX01")
@@ -762,11 +763,32 @@ class TcxClient:
         return body
 
     def _client_token(self) -> str:
+        # Prefer a token echoed by the cloud (official apps reuse it).
+        if self._session_client_token:
+            return self._session_client_token
         if self._user_id and self._auth_token and self._app_client_id:
             return f"{self._user_id}|{self._auth_token}|{self._app_client_id}"
         if self._user_id:
-            return f"{self._user_id}|{uuid.uuid4().hex}"
-        return uuid.uuid4().hex
+            # Spec example shape: userId|random|random
+            return f"{self._user_id}|{uuid.uuid4().hex}|{uuid.uuid4().hex}"
+        return f"{uuid.uuid4().hex}|{uuid.uuid4().hex}|{uuid.uuid4().hex}"
+
+    @staticmethod
+    def _find_client_token(value: Any) -> str | None:
+        if isinstance(value, dict):
+            token = value.get("clientToken")
+            if isinstance(token, str) and token.strip():
+                return token.strip()
+            for item in value.values():
+                found = TcxClient._find_client_token(item)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = TcxClient._find_client_token(item)
+                if found:
+                    return found
+        return None
 
     async def _ws_close_quiet(self) -> None:
         if self._ws_task is not None and not self._ws_task.done():
@@ -822,8 +844,12 @@ class TcxClient:
             return
         async with self._ws_lock:
             if self._ws and not self._ws.closed and self._ws_auth_event.is_set():
+                if self._ws_task is None or self._ws_task.done():
+                    self._ws_task = asyncio.create_task(self._ws_receive_loop())
                 return
             if self._ws and not self._ws.closed and not wait_for_auth:
+                if self._ws_task is None or self._ws_task.done():
+                    self._ws_task = asyncio.create_task(self._ws_receive_loop())
                 return
 
             await self._ensure_token()
@@ -933,7 +959,15 @@ class TcxClient:
             _LOGGER.warning("TCX websocket closed")
 
     async def _handle_ws_frame(self, frame: dict[str, Any]) -> None:
-        if len(self._ws_debug_frames) < 20:
+        token = self._find_client_token(frame)
+        if token and token != self._session_client_token:
+            self._session_client_token = token
+            _LOGGER.debug(
+                "Captured WS clientToken (%d parts)",
+                token.count("|") + 1,
+            )
+
+        if len(self._ws_debug_frames) < 40:
             # Keep a redacted structural sample for diagnostics.
             sample = {
                 "service": frame.get("service"),
@@ -998,7 +1032,12 @@ class TcxClient:
         self._notify()
 
     async def _send_command(
-        self, *, namespace: str, action: str, delta: dict[str, Any]
+        self,
+        *,
+        namespace: str,
+        action: str,
+        delta: dict[str, Any],
+        optimistic: bool = True,
     ) -> None:
         if self.mock:
             self._apply_mock_delta(delta)
@@ -1008,6 +1047,11 @@ class TcxClient:
         await self.async_connect_ws()
         if self._ws is None or self._ws.closed:
             raise TcxApiError("WebSocket unavailable for command")
+        if self._ws_task is None or self._ws_task.done():
+            self._ws_task = asyncio.create_task(self._ws_receive_loop())
+            # Let the receive loop attach before we send.
+            await asyncio.sleep(0)
+
         frame = {
             "version": 1,
             "action": action,
@@ -1017,16 +1061,18 @@ class TcxClient:
             "payload": {**delta, "clientToken": self._client_token()},
         }
         _LOGGER.info(
-            "TCX WS command %s/%s keys=%s",
+            "TCX WS command %s/%s keys=%s optimistic=%s",
             namespace,
             action,
             list(delta.keys()),
+            optimistic,
         )
         await self._ws.send_json(frame)
-        # Deep-merge only — never replace an aux object with a bare {st: N}
-        # stub (that wipes app/et/fr and breaks discovery).
-        self._reported = _deep_merge(self._reported, delta)
-        self._notify()
+        if optimistic:
+            # Deep-merge only — never replace an aux object with a bare {st: N}
+            # stub (that wipes app/et/fr and breaks discovery).
+            self._reported = _deep_merge(self._reported, delta)
+            self._notify()
 
     def _apply_mock_delta(self, delta: dict[str, Any]) -> None:
         for key, value in delta.items():
@@ -1081,31 +1127,30 @@ class TcxClient:
             delta={"ecm0": {"cmdSpd": int(rpm)}},
         )
 
-    async def _async_wait_aux_state(
-        self, aux_key: str, want_st: int, *, timeout: float = 8.0
+    async def _async_wait_aux_remote(
+        self,
+        aux_key: str,
+        want_st: int,
+        *,
+        frames_before: int,
+        timeout: float = 6.0,
     ) -> bool:
-        """Wait for reported aux.st to match (from WS push or optimistic merge)."""
+        """Wait for a *remote* aux.st change (new WS frames after the command)."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             current = self._reported.get(aux_key)
-            if isinstance(current, dict) and int(current.get("st") or 0) == want_st:
-                # Prefer a "real" aux object when possible, but accept st match.
+            got_frame = len(self._ws_debug_frames) > frames_before
+            if (
+                isinstance(current, dict)
+                and int(current.get("st") or 0) == want_st
+                and (got_frame or self.mock)
+            ):
                 return True
-            await asyncio.sleep(0.25)
-        _LOGGER.warning(
-            "TCX aux %s did not report st=%s within %.1fs",
-            aux_key,
-            want_st,
-            timeout,
-        )
+            await asyncio.sleep(0.2)
         return False
 
     async def async_set_light(self, on: bool, color: int | None = None) -> None:
-        """Toggle pool light.
-
-        On/off is always ``setAuxState`` (wired aux) or ``setZigbeeState``
-        (auxz*). Color programs use ``setAuxLight`` with a 1-based index.
-        """
+        """Toggle pool light, trying known TCX command envelopes until echoed."""
         state = self.get_state()
         aux_key = state.light_key
         if not aux_key:
@@ -1132,7 +1177,6 @@ class TcxClient:
                         aux_key = key
                         break
         if not aux_key:
-            # Last resort so the entity stays controllable while discovery catches up.
             for key in ("aux1", "aux2", "aux0", "auxz0"):
                 if isinstance(state.raw.get(key), dict):
                     aux_key = key
@@ -1143,40 +1187,118 @@ class TcxClient:
                 aux_key,
             )
 
+        want_st = 1 if on else 0
+        raw_aux = state.raw.get(aux_key) if isinstance(state.raw.get(aux_key), dict) else {}
+        cmd_clr = color
+        if cmd_clr is None:
+            try:
+                cmd_clr = int(raw_aux.get("currClr") or raw_aux.get("cmdClr") or 1)
+            except (TypeError, ValueError):
+                cmd_clr = 1
+
         _LOGGER.info(
-            "TCX light %s via %s (color_index=%s)",
+            "TCX light %s via %s (color_index=%s session_token=%s)",
             "on" if on else "off",
             aux_key,
-            color,
+            cmd_clr,
+            "yes" if self._session_client_token else "no",
         )
 
-        delta = {aux_key: {"st": 1 if on else 0}}
-
-        # On/off: confirmed wire path is setAuxState / setZigbeeState.
-        # REST desired POSTs need AWS SigV4 and are not used.
-        if aux_key.startswith("auxz"):
-            await self._send_command(
-                namespace=NAMESPACE_ZIGBEE,
-                action=ACTION_SET_ZIGBEE_STATE,
-                delta=delta,
-            )
-        else:
+        if self.mock:
             await self._send_command(
                 namespace=NAMESPACE_TCX,
                 action=ACTION_SET_AUX_STATE,
-                delta=delta,
+                delta={aux_key: {"st": want_st}},
+            )
+            return
+
+        # Try documented + observed envelopes. Do NOT optimistic-merge — prior
+        # runs showed setAuxState/tcx can be ignored while local state lied.
+        simple = {aux_key: {"st": want_st}}
+        with_color = {aux_key: {"st": want_st, "cmdClr": int(cmd_clr)}}
+        desired_wrap = {"state": {"desired": {aux_key: {"st": want_st}}}}
+        variants: list[tuple[str, str, dict[str, Any]]] = []
+        if aux_key.startswith("auxz"):
+            variants.extend(
+                [
+                    (NAMESPACE_ZIGBEE, ACTION_SET_ZIGBEE_STATE, simple),
+                    ("zig", ACTION_SET_ZIGBEE_STATE, simple),
+                    ("zig", ACTION_SET_AUX_STATE, simple),
+                ]
+            )
+        else:
+            variants.extend(
+                [
+                    (NAMESPACE_TCX, ACTION_SET_AUX_STATE, simple),
+                    (NAMESPACE_TCX, ACTION_SET_STATE, simple),
+                    (NAMESPACE_TCX, ACTION_SET_AUX_STATE, desired_wrap),
+                    (NAMESPACE_PIB, ACTION_SET_AUX_STATE, simple),
+                    (NAMESPACE_PIB, ACTION_SET_STATE, simple),
+                    (NAMESPACE_PIB, ACTION_SET_AUX_LIGHT, with_color),
+                    (NAMESPACE_PIB, ACTION_SET_AUX_LIGHT, {aux_key: {"cmdClr": int(cmd_clr)}}),
+                    ("zig", ACTION_SET_AUX_STATE, simple),
+                    (NAMESPACE_ZIGBEE, ACTION_SET_ZIGBEE_STATE, simple),
+                ]
             )
 
-        # Color is a separate PIB command; wire index is 1-based.
-        if on and color is not None and not aux_key.startswith("auxz"):
-            await self._send_command(
-                namespace=NAMESPACE_PIB,
-                action=ACTION_SET_AUX_LIGHT,
-                delta={aux_key: {"cmdClr": int(color)}},
+        for namespace, action, delta in variants:
+            frames_before = len(self._ws_debug_frames)
+            try:
+                await self._send_command(
+                    namespace=namespace,
+                    action=action,
+                    delta=delta,
+                    optimistic=False,
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "TCX light variant %s/%s failed to send: %s",
+                    namespace,
+                    action,
+                    err,
+                )
+                continue
+
+            if await self._async_wait_aux_remote(
+                aux_key, want_st, frames_before=frames_before, timeout=5.0
+            ):
+                _LOGGER.info(
+                    "TCX light confirmed via %s/%s (remote st=%s)",
+                    namespace,
+                    action,
+                    want_st,
+                )
+                if on and color is not None and action != ACTION_SET_AUX_LIGHT:
+                    try:
+                        await self._send_command(
+                            namespace=NAMESPACE_PIB,
+                            action=ACTION_SET_AUX_LIGHT,
+                            delta={aux_key: {"cmdClr": int(color)}},
+                            optimistic=False,
+                        )
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.debug("color follow-up failed", exc_info=True)
+                # Keep local cache in sync with the confirmed remote state.
+                self._reported = _deep_merge(
+                    self._reported, {aux_key: {"st": want_st}}
+                )
+                self._notify()
+                return
+
+            _LOGGER.warning(
+                "TCX light variant %s/%s produced no remote echo "
+                "(frames=%d→%d, st=%s)",
+                namespace,
+                action,
+                frames_before,
+                len(self._ws_debug_frames),
+                (self._reported.get(aux_key) or {}).get("st"),
             )
 
-        # Wait briefly for a cloud/device echo of the new st value.
-        await self._async_wait_aux_state(aux_key, 1 if on else 0, timeout=8.0)
+        raise TcxApiError(
+            f"Light command sent but controller never echoed st={want_st} "
+            f"for {aux_key}. Tried {len(variants)} websocket envelopes."
+        )
 
     async def async_set_water_feature(self, on: bool) -> None:
         state = self.get_state()

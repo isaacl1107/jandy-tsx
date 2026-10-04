@@ -184,28 +184,29 @@ async def _run(args: argparse.Namespace) -> int:
         want_on = not args.off
         aux_key = state.light_key
         print(f"\nSending light {'ON' if want_on else 'OFF'} via {aux_key}…")
+        print(
+            "(Requires a websocket echo of aux.st — local optimistic updates "
+            "no longer count as success.)"
+        )
         try:
             await client.async_set_light(want_on)
-            print("Command finished (websocket setAuxState).")
+            print("Controller echoed the new light state over websocket.")
         except Exception as err:  # noqa: BLE001
             print(f"Command FAILED: {err}", file=sys.stderr)
+            print("\n=== WS frames after failed command ===")
+            print(json.dumps(client._ws_debug_frames, indent=2))  # noqa: SLF001
+            _dump_aux(client.get_state().raw)
             await client.async_close()
             return 1
 
-        # Keep WS open and watch for echo — do NOT re-fetch REST (no aux there).
-        print("Watching websocket for 8s for device echo…")
-        await asyncio.sleep(8)
-
         after = client.get_state()
         raw_aux = after.raw.get(aux_key)
-        real = _is_real_aux(raw_aux if isinstance(raw_aux, dict) else None)
-        print("\n=== Light state after command ===")
+        print("\n=== Light state after confirmed command ===")
         print(
             json.dumps(
                 {
                     "light_key": after.light_key,
                     "light_on": after.light_on,
-                    "aux_looks_real": real,
                     "raw_st": (raw_aux or {}).get("st")
                     if isinstance(raw_aux, dict)
                     else None,
@@ -218,28 +219,12 @@ async def _run(args: argparse.Namespace) -> int:
             )
         )
         _dump_aux(after.raw)
-        if client._ws_debug_frames:  # noqa: SLF001
-            print("\n=== WS frames (incl. post-command) ===")
-            print(json.dumps(client._ws_debug_frames, indent=2))  # noqa: SLF001
-
-        if not real:
-            print(
-                "\nRESULT: FAIL — lost aux discovery after command "
-                "(should not happen with deep-merge fix)."
-            )
-            await client.async_close()
-            return 1
-
-        ok = after.light_on is want_on
         print(
-            "\nRESULT:",
-            "PASS — reported light state matches request "
-            "(confirm the physical light also changed)"
-            if ok
-            else "FAIL — reported state did not match; check WS error frames above",
+            "\nRESULT: PASS — cloud echoed the new state. "
+            "Confirm the physical light also changed."
         )
         await client.async_close()
-        return 0 if ok else 1
+        return 0
 
 
 def main() -> None:
