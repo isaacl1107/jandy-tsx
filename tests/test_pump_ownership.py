@@ -120,13 +120,17 @@ async def test_light_and_water_feature_ownership():
     coord = _coordinator()
     when = datetime(2026, 10, 5, 20, 0)
 
-    await coord._maybe_set_light(True, TcxState(light_on=False), when)
-    coord.client.async_set_light.assert_awaited_with(True)
+    await coord._maybe_set_light(
+        {"on": True, "color": 3}, TcxState(light_on=False), when
+    )
+    coord.client.async_set_light.assert_awaited_with(True, 3)
     assert coord._schedule_owns["light"] is True
 
     coord.mark_manual("light", True)
     coord.client.async_set_light.reset_mock()
-    await coord._maybe_set_light(False, TcxState(light_on=True), when)
+    await coord._maybe_set_light(
+        {"on": False, "color": None}, TcxState(light_on=True), when
+    )
     coord.client.async_set_light.assert_not_awaited()
 
     await coord._maybe_set_water_feature(

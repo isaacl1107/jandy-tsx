@@ -114,12 +114,17 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
             or "water_feature" in managed
         )
         if pump_managed:
-            await self._maybe_set_pump(bool(desired["pump"]["on"]), state, now)
+            await self._maybe_set_pump(
+                bool(desired["pump"]["on"]),
+                state,
+                now,
+                rpm=desired["pump"].get("rpm"),
+            )
 
         if "heater" in managed:
             await self._maybe_set_heater(desired["heater"], state, now)
         if "light" in managed:
-            await self._maybe_set_light(desired["light"]["on"], state, now)
+            await self._maybe_set_light(desired["light"], state, now)
         if "water_feature" in managed:
             await self._maybe_set_water_feature(
                 desired["water_feature"]["on"], state, now
@@ -136,10 +141,25 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
         self.mark_manual("pump", on)
 
     async def _maybe_set_pump(
-        self, should_on: bool, state: TcxState, when: datetime
+        self,
+        should_on: bool,
+        state: TcxState,
+        when: datetime,
+        *,
+        rpm: int | None = None,
     ) -> None:
         if should_on:
-            key = ("pump", True)
+            if rpm is not None and (
+                state.pump_rpm is None or abs(int(state.pump_rpm) - int(rpm)) >= 50
+            ):
+                _LOGGER.info(
+                    "Schedule setting filter pump RPM to %s at %s",
+                    rpm,
+                    when.isoformat(),
+                )
+                await self.client.async_set_pump_rpm(int(rpm))
+
+            key = ("pump", True, rpm)
             if state.pump_on:
                 # Already running — do not claim ownership.
                 self._last_applied["pump"] = key
@@ -151,7 +171,7 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
             self._last_applied["pump"] = key
             return
 
-        key = ("pump", False)
+        key = ("pump", False, None)
         if not self._schedule_owns.get("pump"):
             _LOGGER.debug(
                 "Ignoring schedule pump-off at %s (HA did not start this run)",
@@ -223,21 +243,36 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
         self._last_applied["heater"] = key
 
     async def _maybe_set_light(
-        self, should_on: bool, state: TcxState, when: datetime
+        self, light: dict[str, Any], state: TcxState, when: datetime
     ) -> None:
+        should_on = bool(light.get("on"))
+        color = light.get("color")
+        color_i = int(color) if color is not None else None
+
         if should_on:
-            key = ("light", True)
+            key = ("light", True, color_i)
             if state.light_on:
+                if color_i is not None and int(state.light_color or 0) != color_i:
+                    _LOGGER.info(
+                        "Schedule setting pool light color %s at %s",
+                        color_i,
+                        when.isoformat(),
+                    )
+                    await self.client.async_set_light(True, color_i)
                 self._last_applied["light"] = key
                 return
 
-            _LOGGER.info("Schedule enabling pool light at %s", when.isoformat())
-            await self.client.async_set_light(True)
+            _LOGGER.info(
+                "Schedule enabling pool light at %s (color=%s)",
+                when.isoformat(),
+                color_i,
+            )
+            await self.client.async_set_light(True, color_i)
             self._schedule_owns["light"] = True
             self._last_applied["light"] = key
             return
 
-        key = ("light", False)
+        key = ("light", False, None)
         if not self._schedule_owns.get("light"):
             _LOGGER.debug(
                 "Ignoring schedule light-off at %s (HA did not start this run)",

@@ -28,6 +28,7 @@ from .const import (
     TEMP_MAX_F,
     TEMP_MIN_F,
 )
+from .light import JANDY_EFFECTS
 from .schedule import DEFAULT_SCHEDULES
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,6 +48,11 @@ TARGET_OPTIONS = [
     selector.SelectOptionDict(value="pump", label="Filter pump"),
     selector.SelectOptionDict(value="light", label="Pool light"),
     selector.SelectOptionDict(value="water_feature", label="Water feature"),
+]
+
+LIGHT_COLOR_OPTIONS = [
+    selector.SelectOptionDict(value=str(idx), label=name)
+    for idx, name in enumerate(JANDY_EFFECTS, start=1)
 ]
 
 STEP_USER = vol.Schema(
@@ -78,8 +84,17 @@ def _schedule_label(slot: dict[str, Any]) -> str:
     target = str(slot.get("target", "heater"))
     start = slot.get("start", "??:??")
     end = slot.get("end", "??:??")
-    setpoint = slot.get("setpoint_f")
-    suffix = f" @ {setpoint:g}°F" if target == "heater" and setpoint is not None else ""
+    suffix = ""
+    if target == "heater" and slot.get("setpoint_f") is not None:
+        suffix = f" @ {float(slot['setpoint_f']):g}°F"
+    elif target == "pump" and slot.get("rpm") is not None:
+        suffix = f" @ {int(slot['rpm'])} RPM"
+    elif target == "light" and slot.get("light_color") is not None:
+        idx = int(slot["light_color"])
+        if 1 <= idx <= len(JANDY_EFFECTS):
+            suffix = f" @ {JANDY_EFFECTS[idx - 1]}"
+        else:
+            suffix = f" @ color {idx}"
     return f"{target}: {start}-{end} ({day_txt}) [{enabled}]{suffix}"
 
 
@@ -212,6 +227,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         self._schedules: list[dict[str, Any]] = []
         self._poll_interval = DEFAULT_POLL_INTERVAL
         self._edit_id: str | None = None
+        self._form_target: str | None = None
 
     def _load_working_copy(self) -> None:
         if self._schedules:
@@ -292,9 +308,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             action = user_input["schedule_action"]
             if action == "add":
                 self._edit_id = None
-                return await self.async_step_schedule_form()
+                self._form_target = None
+                return await self.async_step_schedule_target()
             if action.startswith("edit:"):
                 self._edit_id = action.split(":", 1)[1]
+                defaults = self._slot_defaults()
+                self._form_target = str(defaults.get("target") or "heater")
                 return await self.async_step_schedule_form()
             if action.startswith("delete:"):
                 self._edit_id = action.split(":", 1)[1]
@@ -334,20 +353,70 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     return slot
         return {
             "id": uuid.uuid4().hex[:10],
-            "target": "heater",
+            "target": self._form_target or "heater",
             "days": [0, 1, 2, 3, 4],
             "start": "10:00",
             "end": "18:00",
             "enabled": True,
             "setpoint_f": 84,
+            "rpm": 2500,
+            "light_color": 1,
         }
+
+    def _pump_rpm_bounds(self) -> tuple[int, int, int]:
+        min_rpm, max_rpm, default = 1000, 3450, 2500
+        try:
+            coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+            state = getattr(coordinator, "data", None) if coordinator else None
+            if state is not None:
+                min_rpm = int(getattr(state, "pump_min_rpm", None) or min_rpm)
+                max_rpm = int(getattr(state, "pump_max_rpm", None) or max_rpm)
+                if getattr(state, "pump_rpm", None):
+                    default = int(state.pump_rpm)
+        except (TypeError, ValueError, AttributeError, KeyError):
+            pass
+        default = max(min_rpm, min(max_rpm, default))
+        return min_rpm, max_rpm, default
+
+    async def async_step_schedule_target(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Pick equipment first so the next form only shows relevant fields."""
+        self._load_working_copy()
+        defaults = self._slot_defaults()
+        if user_input is not None:
+            self._form_target = str(user_input["target"])
+            return await self.async_step_schedule_form()
+
+        return self.async_show_form(
+            step_id="schedule_target",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        "target",
+                        default=str(defaults.get("target") or "heater"),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=TARGET_OPTIONS,
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
+                    ),
+                }
+            ),
+            description_placeholders={
+                "mode": "Edit schedule" if self._edit_id else "Add schedule"
+            },
+        )
 
     async def async_step_schedule_form(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         self._load_working_copy()
         defaults = self._slot_defaults()
+        target = str(self._form_target or defaults.get("target") or "heater")
+        self._form_target = target
         errors: dict[str, str] = {}
+        min_rpm, max_rpm, default_rpm = self._pump_rpm_bounds()
 
         if user_input is not None:
             start = _normalize_hhmm(user_input["start"], defaults["start"])
@@ -356,8 +425,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             if not days:
                 errors["days"] = "no_days"
             else:
-                target = user_input["target"]
                 setpoint = user_input.get("setpoint_f")
+                rpm = user_input.get("rpm")
+                light_color = user_input.get("light_color")
                 slot = {
                     "id": defaults["id"],
                     "target": target,
@@ -370,6 +440,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         if target == "heater" and setpoint is not None
                         else None
                     ),
+                    "rpm": (
+                        int(rpm) if target == "pump" and rpm is not None else None
+                    ),
+                    "light_color": (
+                        int(light_color)
+                        if target == "light" and light_color is not None
+                        else None
+                    ),
                 }
                 replaced = False
                 for idx, existing in enumerate(self._schedules):
@@ -380,61 +458,92 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 if not replaced:
                     self._schedules.append(slot)
                 self._edit_id = None
+                self._form_target = None
                 return await self.async_step_schedules()
 
-        schema = vol.Schema(
-            {
+        schema_dict: dict[Any, Any] = {
+            vol.Required(
+                "days",
+                default=[str(d) for d in defaults.get("days", [])],
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=DAY_OPTIONS,
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.LIST,
+                )
+            ),
+            vol.Required(
+                "start", default=_normalize_hhmm(defaults.get("start"), "10:00")
+            ): selector.TimeSelector(),
+            vol.Required(
+                "end", default=_normalize_hhmm(defaults.get("end"), "18:00")
+            ): selector.TimeSelector(),
+        }
+
+        if target == "heater":
+            schema_dict[
                 vol.Required(
-                    "target", default=defaults.get("target", "heater")
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=TARGET_OPTIONS,
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Required(
-                    "days",
-                    default=[str(d) for d in defaults.get("days", [])],
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=DAY_OPTIONS,
-                        multiple=True,
-                        mode=selector.SelectSelectorMode.LIST,
-                    )
-                ),
-                vol.Required(
-                    "start", default=_normalize_hhmm(defaults.get("start"), "10:00")
-                ): selector.TimeSelector(),
-                vol.Required(
-                    "end", default=_normalize_hhmm(defaults.get("end"), "18:00")
-                ): selector.TimeSelector(),
-                vol.Optional(
                     "setpoint_f",
                     default=(
                         float(defaults["setpoint_f"])
                         if defaults.get("setpoint_f") is not None
                         else 84.0
                     ),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=TEMP_MIN_F,
-                        max=TEMP_MAX_F,
-                        step=1,
-                        mode=selector.NumberSelectorMode.SLIDER,
-                        unit_of_measurement="°F",
-                    )
-                ),
-                vol.Required(
-                    "enabled", default=bool(defaults.get("enabled", True))
-                ): selector.BooleanSelector(),
-            }
-        )
+                )
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=TEMP_MIN_F,
+                    max=TEMP_MAX_F,
+                    step=1,
+                    mode=selector.NumberSelectorMode.SLIDER,
+                    unit_of_measurement="°F",
+                )
+            )
+        elif target == "pump":
+            rpm_default = (
+                int(defaults["rpm"])
+                if defaults.get("rpm") is not None
+                else default_rpm
+            )
+            rpm_default = max(min_rpm, min(max_rpm, rpm_default))
+            schema_dict[
+                vol.Required("rpm", default=rpm_default)
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=min_rpm,
+                    max=max_rpm,
+                    step=50,
+                    mode=selector.NumberSelectorMode.SLIDER,
+                    unit_of_measurement="RPM",
+                )
+            )
+        elif target == "light":
+            color_default = str(
+                int(defaults["light_color"])
+                if defaults.get("light_color") is not None
+                else 1
+            )
+            schema_dict[
+                vol.Required("light_color", default=color_default)
+            ] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=LIGHT_COLOR_OPTIONS,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+
+        schema_dict[
+            vol.Required("enabled", default=bool(defaults.get("enabled", True)))
+        ] = selector.BooleanSelector()
+
+        target_labels = {opt["value"]: opt["label"] for opt in TARGET_OPTIONS}
         return self.async_show_form(
             step_id="schedule_form",
-            data_schema=schema,
+            data_schema=vol.Schema(schema_dict),
             errors=errors,
             description_placeholders={
-                "mode": "Edit schedule" if self._edit_id else "Add schedule"
+                "mode": "Edit schedule" if self._edit_id else "Add schedule",
+                "equipment": target_labels.get(target, target),
             },
         )
 

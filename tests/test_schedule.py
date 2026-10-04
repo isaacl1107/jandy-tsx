@@ -101,6 +101,46 @@ def test_water_feature_forces_pump():
     assert desired_states(slots, noon)["pump"]["on"] is True
 
 
+def test_pump_rpm_and_light_color_in_desired_states():
+    slots = [
+        ScheduleSlot(
+            id="p1",
+            target="pump",
+            days=(0,),
+            start=time(8, 0),
+            end=time(12, 0),
+            rpm=2500,
+        ),
+        ScheduleSlot(
+            id="l1",
+            target="light",
+            days=(0,),
+            start=time(8, 0),
+            end=time(12, 0),
+            light_color=3,
+        ),
+    ]
+    noon = datetime(2026, 10, 5, 10, 0)
+    desired = desired_states(slots, noon)
+    assert desired["pump"]["on"] is True
+    assert desired["pump"]["rpm"] == 2500
+    assert desired["light"]["on"] is True
+    assert desired["light"]["color"] == 3
+
+    raw = [
+        {
+            "id": "p1",
+            "target": "pump",
+            "days": [0],
+            "start": "08:00",
+            "end": "12:00",
+            "rpm": 2200,
+        }
+    ]
+    parsed = slots_from_config(raw)
+    assert parsed[0].rpm == 2200
+
+
 def test_managed_targets_only_listed_equipment():
     slots = [
         ScheduleSlot(

@@ -26,6 +26,8 @@ class ScheduleSlot:
     end: time
     enabled: bool = True
     setpoint_f: float | None = None
+    rpm: int | None = None
+    light_color: int | None = None  # 1-based Jandy WaterColors index
 
     def active_at(self, when: datetime) -> bool:
         if not self.enabled or when.weekday() not in self.days:
@@ -47,6 +49,8 @@ def slot_from_dict(data: dict[str, Any]) -> ScheduleSlot:
     if target not in SCHEDULE_TARGETS:
         target = "heater"
     days = tuple(int(day) for day in data.get("days", list(range(7))))
+    rpm = data.get("rpm")
+    light_color = data.get("light_color")
     return ScheduleSlot(
         id=str(data["id"]),
         target=target,  # type: ignore[arg-type]
@@ -59,6 +63,8 @@ def slot_from_dict(data: dict[str, Any]) -> ScheduleSlot:
             if data.get("setpoint_f") is not None
             else None
         ),
+        rpm=int(rpm) if rpm is not None else None,
+        light_color=int(light_color) if light_color is not None else None,
     )
 
 
@@ -79,8 +85,8 @@ def desired_states(
     """Return desired heater/pump/light/water-feature state from active slots."""
     result: dict[ScheduleTarget, dict[str, Any]] = {
         "heater": {"on": False, "setpoint_f": None},
-        "pump": {"on": False},
-        "light": {"on": False},
+        "pump": {"on": False, "rpm": None},
+        "light": {"on": False, "color": None},
         "water_feature": {"on": False},
     }
     for slot in slots:
@@ -92,8 +98,12 @@ def desired_states(
                 result["heater"]["setpoint_f"] = slot.setpoint_f
         elif slot.target == "pump":
             result["pump"]["on"] = True
+            if slot.rpm is not None:
+                result["pump"]["rpm"] = slot.rpm
         elif slot.target == "light":
             result["light"]["on"] = True
+            if slot.light_color is not None:
+                result["light"]["color"] = slot.light_color
         elif slot.target == "water_feature":
             result["water_feature"]["on"] = True
     # Heater and water features need filtration running.

@@ -27,7 +27,7 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 
 ## Install on your Home Assistant (Raspberry Pi)
 
-Current version: **1.4.6**
+Current version: **1.4.7**
 
 ### Option A — HACS (recommended)
 
@@ -39,7 +39,10 @@ Current version: **1.4.6**
 6. **Settings → Devices & services → Add integration → Jandy AquaLink TCX**
 7. Sign in with your iAquaLink / Jandy email + password
 
-To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.4.6"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.4.7"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+
+**v1.4.7**
+- Schedule form is equipment-specific: heater shows setpoint, filter pump shows RPM, pool light shows WaterColors programs (no leftover temperature slider on non-heater schedules).
 
 **v1.4.6**
 - Switch icons change with on/off (`pump` / `fire` / `calendar` / `fountain`), matching the light’s state feedback.
@@ -105,10 +108,9 @@ New installs start with **no schedules**. Add only what you want:
 1. Open the integration → **Configure**
 2. Choose **Manage schedules**
 3. **Add** / **Edit** / **Delete** weekly windows in the UI:
-   - Equipment: **heater**, **filter pump**, **pool light**, or **water feature**
-   - Days of week
-   - Start / end time
-   - Heater setpoint (°F) when equipment is heater
+   - Pick equipment first: **heater**, **filter pump**, **pool light**, or **water feature**
+   - Days of week + start / end time
+   - Heater → setpoint (°F); pump → RPM; light → color/program
    - Enabled toggle
 4. Choose **Save and finish**
 
