@@ -30,15 +30,52 @@
     "step": {
       "init": {
         "title": "TCX options",
-        "description": "Edit poll interval and weekly schedules (JSON). Targets: heater, pump. Days: Mon=0 … Sun=6. Times are HH:MM in your Home Assistant timezone.",
+        "description": "You have {count} schedule(s). Poll interval is {poll}s.",
+        "menu_options": {
+          "schedules": "Manage schedules",
+          "poll": "Poll interval",
+          "save": "Save and finish"
+        }
+      },
+      "poll": {
+        "title": "Poll interval",
+        "description": "How often Home Assistant refreshes TCX state from the cloud.",
         "data": {
-          "poll_interval": "Poll interval (seconds)",
-          "schedules_json": "Schedules JSON"
+          "poll_interval": "Poll interval"
+        }
+      },
+      "schedules": {
+        "title": "Schedules",
+        "description": "{count} schedule(s) configured. Add, edit, or delete weekly heater/pump windows.",
+        "data": {
+          "schedule_action": "Choose an action"
+        }
+      },
+      "schedule_form": {
+        "title": "{mode}",
+        "description": "Set the weekly window. Heater schedules also keep the filter pump on while active. Overnight windows are supported (for example 22:00 to 06:00).",
+        "data": {
+          "target": "Equipment",
+          "days": "Days",
+          "start": "Start time",
+          "end": "End time",
+          "setpoint_f": "Heater setpoint (°F, ignored for pump)",
+          "enabled": "Enabled"
+        },
+        "data_description": {
+          "setpoint_f": "Only used when Equipment is Heater."
+        }
+      },
+      "schedule_delete": {
+        "title": "Delete schedule",
+        "description": "Delete this schedule?\n\n{label}",
+        "data": {
+          "confirm": "Yes, delete it"
         }
       }
     },
     "error": {
-      "invalid_schedules": "Schedules JSON is invalid"
+      "no_days": "Select at least one day"
     }
   },
   "entity": {

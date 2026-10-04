@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 import aiohttp
@@ -11,6 +12,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import TcxApiError, TcxAuthError, TcxClient
@@ -23,10 +25,27 @@ from .const import (
     CONF_SERIAL,
     DEFAULT_POLL_INTERVAL,
     DOMAIN,
+    TEMP_MAX_F,
+    TEMP_MIN_F,
 )
 from .schedule import DEFAULT_SCHEDULES
 
 _LOGGER = logging.getLogger(__name__)
+
+DAY_OPTIONS = [
+    selector.SelectOptionDict(value="0", label="Monday"),
+    selector.SelectOptionDict(value="1", label="Tuesday"),
+    selector.SelectOptionDict(value="2", label="Wednesday"),
+    selector.SelectOptionDict(value="3", label="Thursday"),
+    selector.SelectOptionDict(value="4", label="Friday"),
+    selector.SelectOptionDict(value="5", label="Saturday"),
+    selector.SelectOptionDict(value="6", label="Sunday"),
+]
+
+TARGET_OPTIONS = [
+    selector.SelectOptionDict(value="heater", label="Heater"),
+    selector.SelectOptionDict(value="pump", label="Filter pump"),
+]
 
 STEP_USER = vol.Schema(
     {
@@ -35,6 +54,31 @@ STEP_USER = vol.Schema(
         vol.Optional(CONF_MOCK, default=False): bool,
     }
 )
+
+
+def _normalize_hhmm(value: Any, default: str = "10:00") -> str:
+    """Normalize HA time selector values to HH:MM."""
+    if value is None:
+        return default
+    if hasattr(value, "hour") and hasattr(value, "minute"):
+        return f"{int(value.hour):02d}:{int(value.minute):02d}"
+    text = str(value)
+    if len(text) >= 5 and text[2] == ":":
+        return text[:5]
+    return default
+
+
+def _schedule_label(slot: dict[str, Any]) -> str:
+    days = slot.get("days") or []
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    day_txt = ",".join(day_names[int(d)] for d in days if 0 <= int(d) <= 6) or "No days"
+    enabled = "on" if slot.get("enabled", True) else "off"
+    target = str(slot.get("target", "heater"))
+    start = slot.get("start", "??:??")
+    end = slot.get("end", "??:??")
+    setpoint = slot.get("setpoint_f")
+    suffix = f" @ {setpoint:g}°F" if target == "heater" and setpoint is not None else ""
+    return f"{target}: {start}-{end} ({day_txt}) [{enabled}]{suffix}"
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -159,53 +203,265 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Options: poll interval + JSON schedules."""
+    """Options UI for poll interval and weekly schedules."""
 
     def __init__(self, entry: config_entries.ConfigEntry) -> None:
         self._entry = entry
+        self._schedules: list[dict[str, Any]] = []
+        self._poll_interval = DEFAULT_POLL_INTERVAL
+        self._edit_id: str | None = None
+
+    def _load_working_copy(self) -> None:
+        if self._schedules:
+            return
+        raw = self._entry.options.get(
+            CONF_SCHEDULES,
+            self._entry.data.get(CONF_SCHEDULES, DEFAULT_SCHEDULES),
+        )
+        self._schedules = [dict(item) for item in raw]
+        self._poll_interval = int(
+            self._entry.options.get(
+                CONF_POLL_INTERVAL,
+                self._entry.data.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL),
+            )
+        )
+
+    def _save(self) -> FlowResult:
+        return self.async_create_entry(
+            title="",
+            data={
+                CONF_POLL_INTERVAL: int(self._poll_interval),
+                CONF_SCHEDULES: self._schedules,
+            },
+        )
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        import json
-
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            try:
-                schedules = json.loads(user_input["schedules_json"])
-                if not isinstance(schedules, list):
-                    raise ValueError("schedules must be a list")
-            except (ValueError, json.JSONDecodeError):
-                errors["base"] = "invalid_schedules"
-            else:
-                return self.async_create_entry(
-                    title="",
-                    data={
-                        CONF_POLL_INTERVAL: int(user_input[CONF_POLL_INTERVAL]),
-                        CONF_SCHEDULES: schedules,
-                    },
-                )
-
-        current = self._entry.options.get(
-            CONF_SCHEDULES,
-            self._entry.data.get(CONF_SCHEDULES, DEFAULT_SCHEDULES),
-        )
-        poll = self._entry.options.get(
-            CONF_POLL_INTERVAL,
-            self._entry.data.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL),
-        )
-        return self.async_show_form(
+        """Show the top-level options menu."""
+        self._load_working_copy()
+        return self.async_show_menu(
             step_id="init",
+            menu_options=["schedules", "poll", "save"],
+            description_placeholders={
+                "count": str(len(self._schedules)),
+                "poll": str(self._poll_interval),
+            },
+        )
+
+    async def async_step_save(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Persist working schedule/poll changes."""
+        self._load_working_copy()
+        return self._save()
+
+    async def async_step_poll(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        self._load_working_copy()
+        if user_input is not None:
+            self._poll_interval = int(user_input[CONF_POLL_INTERVAL])
+            return await self.async_step_init()
+        return self.async_show_form(
+            step_id="poll",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_POLL_INTERVAL, default=int(poll)): vol.All(
-                        vol.Coerce(int), vol.Range(min=15, max=300)
-                    ),
                     vol.Required(
-                        "schedules_json",
-                        default=json.dumps(current, indent=2),
-                    ): str,
+                        CONF_POLL_INTERVAL, default=self._poll_interval
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=15,
+                            max=300,
+                            step=5,
+                            mode=selector.NumberSelectorMode.BOX,
+                            unit_of_measurement="seconds",
+                        )
+                    ),
                 }
             ),
+        )
+
+    async def async_step_schedules(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        self._load_working_copy()
+        if user_input is not None:
+            action = user_input["schedule_action"]
+            if action == "add":
+                self._edit_id = None
+                return await self.async_step_schedule_form()
+            if action.startswith("edit:"):
+                self._edit_id = action.split(":", 1)[1]
+                return await self.async_step_schedule_form()
+            if action.startswith("delete:"):
+                self._edit_id = action.split(":", 1)[1]
+                return await self.async_step_schedule_delete()
+            if action == "back":
+                return await self.async_step_init()
+
+        options: dict[str, str] = {"add": "Add schedule"}
+        for slot in self._schedules:
+            sid = str(slot["id"])
+            options[f"edit:{sid}"] = f"Edit — {_schedule_label(slot)}"
+            options[f"delete:{sid}"] = f"Delete — {_schedule_label(slot)}"
+        options["back"] = "Back"
+
+        return self.async_show_form(
+            step_id="schedules",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("schedule_action"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(value=key, label=label)
+                                for key, label in options.items()
+                            ],
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
+                    )
+                }
+            ),
+            description_placeholders={"count": str(len(self._schedules))},
+        )
+
+    def _slot_defaults(self) -> dict[str, Any]:
+        if self._edit_id:
+            for slot in self._schedules:
+                if str(slot.get("id")) == self._edit_id:
+                    return slot
+        return {
+            "id": uuid.uuid4().hex[:10],
+            "target": "heater",
+            "days": [0, 1, 2, 3, 4],
+            "start": "10:00",
+            "end": "18:00",
+            "enabled": True,
+            "setpoint_f": 84,
+        }
+
+    async def async_step_schedule_form(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        self._load_working_copy()
+        defaults = self._slot_defaults()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            start = _normalize_hhmm(user_input["start"], defaults["start"])
+            end = _normalize_hhmm(user_input["end"], defaults["end"])
+            days = [int(day) for day in user_input.get("days", [])]
+            if not days:
+                errors["days"] = "no_days"
+            else:
+                target = user_input["target"]
+                setpoint = user_input.get("setpoint_f")
+                slot = {
+                    "id": defaults["id"],
+                    "target": target,
+                    "days": days,
+                    "start": start,
+                    "end": end,
+                    "enabled": bool(user_input.get("enabled", True)),
+                    "setpoint_f": (
+                        float(setpoint)
+                        if target == "heater" and setpoint is not None
+                        else None
+                    ),
+                }
+                replaced = False
+                for idx, existing in enumerate(self._schedules):
+                    if str(existing.get("id")) == str(slot["id"]):
+                        self._schedules[idx] = slot
+                        replaced = True
+                        break
+                if not replaced:
+                    self._schedules.append(slot)
+                self._edit_id = None
+                return await self.async_step_schedules()
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    "target", default=defaults.get("target", "heater")
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=TARGET_OPTIONS,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    "days",
+                    default=[str(d) for d in defaults.get("days", [])],
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=DAY_OPTIONS,
+                        multiple=True,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                ),
+                vol.Required(
+                    "start", default=_normalize_hhmm(defaults.get("start"), "10:00")
+                ): selector.TimeSelector(),
+                vol.Required(
+                    "end", default=_normalize_hhmm(defaults.get("end"), "18:00")
+                ): selector.TimeSelector(),
+                vol.Optional(
+                    "setpoint_f",
+                    default=(
+                        float(defaults["setpoint_f"])
+                        if defaults.get("setpoint_f") is not None
+                        else 84.0
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=TEMP_MIN_F,
+                        max=TEMP_MAX_F,
+                        step=1,
+                        mode=selector.NumberSelectorMode.SLIDER,
+                        unit_of_measurement="°F",
+                    )
+                ),
+                vol.Required(
+                    "enabled", default=bool(defaults.get("enabled", True))
+                ): selector.BooleanSelector(),
+            }
+        )
+        return self.async_show_form(
+            step_id="schedule_form",
+            data_schema=schema,
             errors=errors,
+            description_placeholders={
+                "mode": "Edit schedule" if self._edit_id else "Add schedule"
+            },
+        )
+
+    async def async_step_schedule_delete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        self._load_working_copy()
+        slot = next(
+            (item for item in self._schedules if str(item.get("id")) == self._edit_id),
+            None,
+        )
+        if slot is None:
+            self._edit_id = None
+            return await self.async_step_schedules()
+
+        if user_input is not None:
+            if user_input.get("confirm"):
+                self._schedules = [
+                    item
+                    for item in self._schedules
+                    if str(item.get("id")) != self._edit_id
+                ]
+            self._edit_id = None
+            return await self.async_step_schedules()
+
+        return self.async_show_form(
+            step_id="schedule_delete",
+            data_schema=vol.Schema(
+                {vol.Required("confirm", default=False): selector.BooleanSelector()}
+            ),
+            description_placeholders={"label": _schedule_label(slot)},
         )

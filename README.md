@@ -51,36 +51,20 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 Schedules run **inside this integration** (no Node-RED / extra add-on).
 
 1. Open the integration → **Configure**
-2. Edit the **Schedules JSON**
+2. Choose **Manage schedules**
+3. **Add** / **Edit** / **Delete** weekly windows in the UI:
+   - Equipment: heater or filter pump
+   - Days of week
+   - Start / end time
+   - Heater setpoint (°F)
+   - Enabled toggle
+4. Choose **Save and finish**
 
-Example:
+Notes:
 
-```json
-[
-  {
-    "id": "weekday-heat",
-    "target": "heater",
-    "days": [0, 1, 2, 3, 4],
-    "start": "10:00",
-    "end": "18:00",
-    "enabled": true,
-    "setpoint_f": 84
-  },
-  {
-    "id": "daily-filter",
-    "target": "pump",
-    "days": [0, 1, 2, 3, 4, 5, 6],
-    "start": "08:00",
-    "end": "12:00",
-    "enabled": true
-  }
-]
-```
-
-- `days`: Monday = `0` … Sunday = `6`
-- `target`: `heater` or `pump`
 - Times use your Home Assistant timezone
-- When the heater schedule is active, the filter pump is forced on (safe interlock)
+- Overnight windows work (for example 22:00 → 06:00)
+- When a heater schedule is active, the filter pump is forced on (safe interlock)
 - Toggle **Auto schedule** off for full manual control
 
 Services:
