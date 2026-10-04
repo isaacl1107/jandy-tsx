@@ -73,6 +73,7 @@ class TcxState:
     heater_enabled: bool = False
     heater_running: bool = False
     heater_name: str = "Pool Heater"
+    temp_unit_celsius: bool = False
     pump_on: bool = False
     pump_rpm: int | None = None
     pump_min_rpm: int = 1000
@@ -101,6 +102,7 @@ class TcxState:
             "heater_enabled": self.heater_enabled,
             "heater_running": self.heater_running,
             "heater_name": self.heater_name,
+            "temp_unit_celsius": self.temp_unit_celsius,
             "pump_on": self.pump_on,
             "pump_rpm": self.pump_rpm,
             "pump_min_rpm": self.pump_min_rpm,
@@ -119,17 +121,44 @@ class TcxState:
         }
 
 
-def _tenths_to_f(value: Any) -> float | None:
+def _temp_unit_is_celsius(reported: dict[str, Any]) -> bool:
+    """tempSetting: 0 = °C, 1 = °F (Zodiac shadow)."""
+    setting = reported.get("tempSetting")
+    try:
+        return int(setting) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _wire_temp_to_f(value: Any, *, celsius: bool) -> float | None:
+    """Convert a wire temperature (tenths of the active unit) to °F."""
     if value is None:
         return None
     try:
-        return round(float(value) / TEMP_SCALE, 1)
+        display = float(value) / TEMP_SCALE
     except (TypeError, ValueError):
         return None
+    if celsius:
+        return round(display * 9.0 / 5.0 + 32.0, 1)
+    return round(display, 1)
+
+
+def _f_to_wire_temp(temp_f: float, *, celsius: bool) -> int:
+    """Convert °F to wire tenths in the controller's active unit."""
+    if celsius:
+        celsius_val = (float(temp_f) - 32.0) * 5.0 / 9.0
+        return int(round(celsius_val * TEMP_SCALE))
+    return int(round(float(temp_f) * TEMP_SCALE))
+
+
+def _tenths_to_f(value: Any) -> float | None:
+    """Deprecated helper — assumes Fahrenheit tenths. Prefer _wire_temp_to_f."""
+    return _wire_temp_to_f(value, celsius=False)
 
 
 def _f_to_tenths(temp_f: float) -> int:
-    return int(round(float(temp_f) * TEMP_SCALE))
+    """Deprecated helper — assumes Fahrenheit tenths. Prefer _f_to_wire_temp."""
+    return _f_to_wire_temp(temp_f, celsius=False)
 
 
 def _merge_reported(payload: dict[str, Any]) -> dict[str, Any]:
@@ -205,47 +234,69 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
     state.online = str(aws.get("status", "")).lower() == "connected" or bool(
         reported
     )
+    celsius = _temp_unit_is_celsius(reported)
+    state.temp_unit_celsius = celsius
 
     water = reported.get("water") or {}
     if isinstance(water, dict) and "value" in water:
-        state.water_temp_f = _tenths_to_f(water.get("value"))
+        state.water_temp_f = _wire_temp_to_f(water.get("value"), celsius=celsius)
     elif "waterTemp" in reported:
-        state.water_temp_f = _tenths_to_f(reported.get("waterTemp"))
+        state.water_temp_f = _wire_temp_to_f(
+            reported.get("waterTemp"), celsius=celsius
+        )
 
     air = reported.get("air") or {}
     if isinstance(air, dict) and "value" in air:
-        state.air_temp_f = _tenths_to_f(air.get("value"))
+        state.air_temp_f = _wire_temp_to_f(air.get("value"), celsius=celsius)
     elif "airTemp" in reported:
-        # Some payloads publish airTemp already in whole °F.
+        # Some payloads publish airTemp already in whole degrees of the
+        # active unit (not tenths). Values > 200 are treated as tenths.
         try:
             air_raw = float(reported["airTemp"])
-            state.air_temp_f = (
-                round(air_raw / TEMP_SCALE, 1) if air_raw > 200 else air_raw
-            )
+            if air_raw > 200:
+                state.air_temp_f = _wire_temp_to_f(air_raw, celsius=celsius)
+            elif celsius:
+                state.air_temp_f = round(air_raw * 9.0 / 5.0 + 32.0, 1)
+            else:
+                state.air_temp_f = air_raw
         except (TypeError, ValueError):
             state.air_temp_f = None
 
     tsp = reported.get("TspBdy0") or {}
     if isinstance(tsp, dict):
-        state.heater_setpoint_f = _tenths_to_f(tsp.get("waterTempSet"))
+        state.heater_setpoint_f = _wire_temp_to_f(
+            tsp.get("waterTempSet"), celsius=celsius
+        )
         state.heater_enabled = bool(tsp.get("heatEnabled"))
         if tsp.get("name"):
             state.heater_name = str(tsp["name"]) + " Heater"
 
     lvh = reported.get("lvh1") or {}
     if isinstance(lvh, dict):
-        state.heater_running = int(lvh.get("en") or 0) == 1
+        # lvh1.en: 0/≥7 off, 1–5 standby, 6 heating.
+        try:
+            lvh_en = int(lvh.get("en") or 0)
+        except (TypeError, ValueError):
+            lvh_en = 0
+        state.heater_running = lvh_en == 6
         if lvh.get("fr"):
             state.heater_name = str(lvh["fr"])
 
     filt = reported.get("filt0") or {}
     pool = reported.get("pool") or {}
-    if isinstance(filt, dict) and "st" in filt:
-        state.pump_on = int(filt.get("st") or 0) == 1
-    elif isinstance(pool, dict) and "st" in pool:
-        state.pump_on = int(pool.get("st") or 0) == 1
-
     ecm = reported.get("ecm0") or {}
+    # Any of these st=1 means the filtration path is running. Prefer ecm0
+    # (motor) when present — REST main shadow often omits filt0/pool.
+    pump_flags: list[bool] = []
+    for obj in (ecm, filt, pool):
+        if isinstance(obj, dict) and "st" in obj:
+            try:
+                pump_flags.append(int(obj.get("st") or 0) == 1)
+            except (TypeError, ValueError):
+                pass
+    if pump_flags:
+        state.pump_on = any(pump_flags)
+
     if isinstance(ecm, dict):
         for key in ("cmdSpd", "reqSpd", "sp"):
             if ecm.get(key) is not None:
@@ -257,6 +308,19 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
         try:
             state.pump_min_rpm = int(ecm.get("minSpd") or state.pump_min_rpm)
             state.pump_max_rpm = int(ecm.get("maxSpd") or state.pump_max_rpm)
+        except (TypeError, ValueError):
+            pass
+    elif isinstance(filt, dict):
+        for key in ("sp", "manSpd"):
+            if filt.get(key) is not None:
+                try:
+                    state.pump_rpm = int(filt[key])
+                    break
+                except (TypeError, ValueError):
+                    pass
+        try:
+            state.pump_min_rpm = int(filt.get("minSpd") or state.pump_min_rpm)
+            state.pump_max_rpm = int(filt.get("maxSpd") or state.pump_max_rpm)
         except (TypeError, ValueError):
             pass
 
@@ -336,11 +400,14 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
             break
 
     swc = reported.get("swc0") or {}
-    if isinstance(swc, dict) and swc.get("swc") is not None:
-        try:
-            state.swc_percent = int(swc["swc"])
-        except (TypeError, ValueError):
-            state.swc_percent = None
+    if isinstance(swc, dict):
+        for key in ("outputPcnt", "stdPoolPcnt", "swc"):
+            if swc.get(key) is not None:
+                try:
+                    state.swc_percent = int(swc[key])
+                    break
+                except (TypeError, ValueError):
+                    pass
 
     return state
 
@@ -353,6 +420,7 @@ def mock_reported(serial: str = "MOCKTCX01") -> dict[str, Any]:
         "deviceType": "tcx",
         "name": "Backyard Pool",
         "aws": {"status": "connected", "timestamp": int(time.time())},
+        "tempSetting": 1,  # °F
         "airTemp": 74,
         "water": {
             "value": 780,
@@ -1204,11 +1272,44 @@ class TcxClient:
                     self._mock_state[key] = value
         self._reported = dict(self._mock_state)
 
+    def _wire_uses_celsius(self) -> bool:
+        return _temp_unit_is_celsius(self._reported)
+
     async def async_set_filter_pump(self, on: bool) -> None:
+        """Toggle filtration. Requires a remote pool/filt0/ecm0 st echo."""
+        want_st = 1 if on else 0
+        delta = {"pool": {"st": want_st}}
+        if self.mock:
+            await self._send_command(
+                namespace=NAMESPACE_FILTRATION,
+                action=ACTION_SET_FILTER_PUMP_STATE,
+                delta=delta,
+            )
+            return
+
+        frames_before = len(self._ws_debug_frames)
         await self._send_command(
             namespace=NAMESPACE_FILTRATION,
             action=ACTION_SET_FILTER_PUMP_STATE,
-            delta={"pool": {"st": 1 if on else 0}},
+            delta=delta,
+            optimistic=False,
+        )
+        if await self._async_wait_pump_remote(
+            want_st, frames_before=frames_before, timeout=12.0
+        ):
+            # Keep local cache aligned with the confirmed remote state.
+            self._reported = _deep_merge(
+                self._reported,
+                {
+                    "pool": {"st": want_st},
+                    "filt0": {"st": want_st},
+                    "ecm0": {"st": want_st},
+                },
+            )
+            self._notify()
+            return
+        raise TcxApiError(
+            f"Filter pump command sent but controller never echoed st={want_st}"
         )
 
     async def async_set_heater_enabled(self, enabled: bool) -> None:
@@ -1222,7 +1323,13 @@ class TcxClient:
         await self._send_command(
             namespace=NAMESPACE_TCX,
             action=ACTION_SET_WATER_TEMP_SETPOINT,
-            delta={"TspBdy0": {"waterTempSet": _f_to_tenths(temp_f)}},
+            delta={
+                "TspBdy0": {
+                    "waterTempSet": _f_to_wire_temp(
+                        temp_f, celsius=self._wire_uses_celsius()
+                    )
+                }
+            },
         )
 
     async def async_set_pump_rpm(self, rpm: int) -> None:
@@ -1270,6 +1377,42 @@ class TcxClient:
                 "TCX aux %s desired st=%s accepted by cloud but reported "
                 "never changed (device may have rejected or ignored it)",
                 aux_key,
+                want_st,
+            )
+        return False
+
+    async def _async_wait_pump_remote(
+        self,
+        want_st: int,
+        *,
+        frames_before: int,
+        timeout: float = 12.0,
+    ) -> bool:
+        """Wait for filtration echo on pool / filt0 / ecm0."""
+        deadline = time.monotonic() + timeout
+        saw_desired = False
+        while time.monotonic() < deadline:
+            got_frame = len(self._ws_debug_frames) > frames_before or self.mock
+            for key in ("pool", "filt0", "ecm0"):
+                reported = self._reported.get(key)
+                if (
+                    isinstance(reported, dict)
+                    and int(reported.get("st") or 0) == want_st
+                    and got_frame
+                ):
+                    return True
+                desired = self._desired.get(key)
+                if (
+                    isinstance(desired, dict)
+                    and int(desired.get("st") or 0) == want_st
+                    and got_frame
+                ):
+                    saw_desired = True
+            await asyncio.sleep(0.2)
+        if saw_desired:
+            _LOGGER.warning(
+                "TCX pump desired st=%s accepted by cloud but reported "
+                "never changed",
                 want_st,
             )
         return False

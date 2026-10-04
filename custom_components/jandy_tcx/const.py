@@ -47,7 +47,8 @@ ACTION_SET_AUX_LIGHT = "setAuxLight"
 ACTION_SET_ZIGBEE_STATE = "setZigbeeState"
 ACTION_SET_STATE = "setState"
 
-# Temperatures on the wire are tenths of a degree Fahrenheit.
+# Temperatures on the wire are tenths of the controller's active unit
+# (tempSetting 0=°C, 1=°F). HA entities always expose Fahrenheit.
 TEMP_SCALE = 10
 TEMP_MIN_F = 60
 TEMP_MAX_F = 104

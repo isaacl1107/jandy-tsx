@@ -40,18 +40,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await client.async_login()
         if not client.mock:
-            await client.async_get_shadow()
+            # REST main shadow lacks filt0/ecm0/water (those arrive on WS).
+            # Connect websocket first so the first HA refresh has pump + temps.
+            try:
+                await client.async_connect_ws(wait_for_auth=True)
+            except Exception as ws_err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "TCX websocket bootstrap failed (%s); falling back to REST",
+                    ws_err,
+                )
+            try:
+                await client.async_get_shadow()
+            except TcxApiError as err:
+                if not client._ws_auth_event.is_set():  # noqa: SLF001
+                    raise ConfigEntryNotReady(
+                        f"TCX cloud unavailable: {err}"
+                    ) from err
+                _LOGGER.warning(
+                    "Initial TCX REST shadow failed (%s); using websocket state",
+                    err,
+                )
     except TcxAuthError as err:
         raise ConfigEntryNotReady(f"TCX authentication failed: {err}") from err
-    except TcxApiError as err:
-        # Prefer websocket bootstrap over failing setup on a transient REST issue.
-        _LOGGER.warning("Initial TCX shadow fetch failed (%s); trying websocket", err)
-        try:
-            await client.async_connect_ws()
-        except Exception as ws_err:  # noqa: BLE001
-            raise ConfigEntryNotReady(
-                f"TCX cloud unavailable: {err}"
-            ) from ws_err
 
     coordinator = TcxCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()

@@ -41,6 +41,23 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
             name=DOMAIN,
             update_interval=timedelta(seconds=max(15, int(poll))),
         )
+        # Push WS Authorization / StateStreamer deltas into HA immediately
+        # so pump/temps from pib0/filt/ecm don't wait for the next REST poll.
+        self.client.add_listener(self._on_client_state)
+
+    def _on_client_state(self, state: TcxState) -> None:
+        """Called from the WS receive loop when reported state changes."""
+        if self.hass is None:
+            return
+
+        def _apply() -> None:
+            # Avoid stomping an in-flight coordinator refresh.
+            refresh = getattr(self, "_refresh_task", None)
+            if refresh is not None and not refresh.done():
+                return
+            self.async_set_updated_data(state)
+
+        self.hass.loop.call_soon_threadsafe(_apply)
 
     @property
     def schedules_raw(self) -> list[dict[str, Any]]:
@@ -55,9 +72,11 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
         try:
             if not self.client.mock:
                 try:
-                    await self.client.async_connect_ws()
+                    await self.client.async_connect_ws(wait_for_auth=True)
                 except Exception:  # noqa: BLE001
-                    _LOGGER.debug("WS connect deferred; using REST shadow", exc_info=True)
+                    _LOGGER.debug(
+                        "WS connect deferred; using REST shadow", exc_info=True
+                    )
                 await self.client.async_get_shadow()
             state = self.client.get_state()
             await self._async_apply_schedules(state)
