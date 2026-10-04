@@ -1080,7 +1080,17 @@ class TcxClient:
                     service,
                 )
             if desired:
-                self._desired = _deep_merge(self._desired, desired)
+                # AWS IoT clears accepted desired keys by pushing null; drop those.
+                clean_desired = {
+                    key: value
+                    for key, value in desired.items()
+                    if value is not None
+                }
+                if clean_desired:
+                    self._desired = _deep_merge(self._desired, clean_desired)
+                for key, value in desired.items():
+                    if value is None:
+                        self._desired.pop(key, None)
             if reported:
                 self._reported = _deep_merge(self._reported, reported)
                 self._notify()
@@ -1135,13 +1145,20 @@ class TcxClient:
             # Let the receive loop attach before we send.
             await asyncio.sleep(0)
 
+        # Live hardware (and robot/cyclonext examples) require the MQTT-style
+        # state.desired wrapper. Flat deltas with a valid clientToken still
+        # produced empty StateStreamer acks and never flipped aux.st.
+        if "state" in delta and isinstance(delta.get("state"), dict):
+            payload_body = dict(delta)
+        else:
+            payload_body = {"state": {"desired": delta}}
         frame = {
             "version": 1,
             "action": action,
             "namespace": namespace,
             "service": SERVICE_STATE_CONTROLLER,
             "target": self.serial,
-            "payload": {**delta, "clientToken": self._client_token()},
+            "payload": {**payload_body, "clientToken": self._client_token()},
         }
         _LOGGER.info(
             "TCX WS command %s/%s keys=%s optimistic=%s",
@@ -1154,7 +1171,12 @@ class TcxClient:
         if optimistic:
             # Deep-merge only — never replace an aux object with a bare {st: N}
             # stub (that wipes app/et/fr and breaks discovery).
-            self._reported = _deep_merge(self._reported, delta)
+            merge_delta = delta
+            if "state" in delta and isinstance(delta.get("state"), dict):
+                merge_delta = (delta["state"].get("desired") or {})
+                if not isinstance(merge_delta, dict):
+                    merge_delta = {}
+            self._reported = _deep_merge(self._reported, merge_delta)
             self._notify()
 
     def _apply_mock_delta(self, delta: dict[str, Any]) -> None:
@@ -1337,14 +1359,16 @@ class TcxClient:
         else:
             variants.extend(
                 [
-                    # Confirmed command reference: tcx/setAuxState + flat delta.
+                    # Live-confirmed on RJEB… hardware: setAuxState with the
+                    # MQTT-style state.desired wrapper + real clientToken.
+                    (NAMESPACE_TCX, ACTION_SET_AUX_STATE, state_desired),
+                    (NAMESPACE_TCX, ACTION_SET_STATE, state_desired),
                     (NAMESPACE_TCX, ACTION_SET_AUX_STATE, simple),
                     (NAMESPACE_TCX, ACTION_SET_AUX_STATE, with_color),
                     (NAMESPACE_TCX, ACTION_SET_STATE, simple),
                     (NAMESPACE_TCX, ACTION_SET_STATE, desired_only),
-                    (NAMESPACE_TCX, ACTION_SET_AUX_STATE, state_desired),
+                    (NAMESPACE_PIB, ACTION_SET_AUX_STATE, state_desired),
                     (NAMESPACE_PIB, ACTION_SET_AUX_STATE, simple),
-                    (NAMESPACE_PIB, ACTION_SET_STATE, simple),
                     (NAMESPACE_PIB, ACTION_SET_AUX_LIGHT, with_color),
                     # liptonj docs: light commands sometimes use namespace "zig".
                     ("zig", ACTION_SET_AUX_STATE, simple),
