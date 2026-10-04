@@ -48,10 +48,14 @@ class TcxPumpSwitch(TcxEntity, SwitchEntity):
         return self.coordinator.data.pump_on
 
     async def async_turn_on(self, **kwargs) -> None:
+        # Mark manual before refresh so an idle pump schedule cannot
+        # immediately force the pump back off (seen as On→Off in ~6s).
+        self.coordinator.mark_manual_pump(True)
         await self.coordinator.client.async_set_filter_pump(True)
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
+        self.coordinator.mark_manual_pump(False)
         await self.coordinator.client.async_set_filter_pump(False)
         await self.coordinator.async_request_refresh()
 

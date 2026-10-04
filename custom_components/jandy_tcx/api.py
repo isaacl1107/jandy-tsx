@@ -202,7 +202,7 @@ def _extract_desired_reported(
 
 
 def _summarize_aux(delta: dict[str, Any]) -> dict[str, Any]:
-    """Compact aux*/st summary for logs."""
+    """Compact aux*/pump/st summary for logs."""
     out: dict[str, Any] = {}
     for key, value in delta.items():
         if key.startswith("aux") and isinstance(value, dict):
@@ -211,6 +211,14 @@ def _summarize_aux(delta: dict[str, Any]) -> dict[str, Any]:
                 "cmdClr": value.get("cmdClr"),
                 "currClr": value.get("currClr"),
             }
+        elif key in {"pool", "filt0", "ecm0"} and isinstance(value, dict):
+            out[key] = {
+                "st": value.get("st"),
+                "cmdSpd": value.get("cmdSpd"),
+                "reqSpd": value.get("reqSpd"),
+            }
+        elif key in {"pool", "filt0", "ecm0"} and value is None:
+            out[key] = None
     return out
 
 
