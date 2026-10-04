@@ -1,0 +1,7 @@
+{
+  "name": "Jandy AquaLink TCX",
+  "render_readme": true,
+  "domains": ["jandy_tcx"],
+  "homeassistant": "2024.1.0",
+  "iot_class": "Cloud Polling"
+}

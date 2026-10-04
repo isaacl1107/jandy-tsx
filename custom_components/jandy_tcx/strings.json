@@ -1,0 +1,62 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Jandy AquaLink TCX",
+        "description": "Sign in with your iAquaLink / Jandy account. Works on Raspberry Pi and any Home Assistant install — no Supervisor add-on required.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "mock": "Use offline mock controller (for testing)"
+        }
+      },
+      "device": {
+        "title": "Select TCX controller",
+        "data": {
+          "serial": "Controller"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password",
+      "cannot_connect": "Could not reach Zodiac / iAquaLink cloud",
+      "no_devices": "No AquaLink TCX controllers found on this account"
+    },
+    "abort": {
+      "already_configured": "This TCX controller is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "TCX options",
+        "description": "Edit poll interval and weekly schedules (JSON). Targets: heater, pump. Days: Mon=0 … Sun=6. Times are HH:MM in your Home Assistant timezone.",
+        "data": {
+          "poll_interval": "Poll interval (seconds)",
+          "schedules_json": "Schedules JSON"
+        }
+      }
+    },
+    "error": {
+      "invalid_schedules": "Schedules JSON is invalid"
+    }
+  },
+  "entity": {
+    "climate": {
+      "heater": {
+        "name": "Heater"
+      }
+    },
+    "switch": {
+      "filter_pump": {
+        "name": "Filter pump"
+      },
+      "heater_enable": {
+        "name": "Heater enable"
+      },
+      "auto_schedule": {
+        "name": "Auto schedule"
+      }
+    }
+  }
+}

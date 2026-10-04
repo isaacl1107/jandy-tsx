@@ -1,0 +1,15 @@
+set_schedule_enabled:
+  name: Set schedule enabled
+  description: Enable or pause the integration's local heater/pump schedules.
+  fields:
+    enabled:
+      name: Enabled
+      description: Whether automatic schedules should run.
+      required: true
+      example: true
+      selector:
+        boolean:
+
+apply_schedules_now:
+  name: Apply schedules now
+  description: Re-evaluate weekly schedules immediately and send heater/pump commands if needed.
