@@ -385,9 +385,39 @@ async def _run(args: argparse.Namespace) -> int:
             )
         )
 
+        sh = ws_raw.get("sh")
+        if isinstance(sh, dict) and sh:
+            print("\n=== TCX panel schedules (sh.*) ===")
+            print(
+                "These run ON THE CONTROLLER, independent of Home Assistant "
+                "Auto schedule. A Pool Filtration of=21:00 will turn the pump "
+                "off at 9pm local even if HA just turned it on."
+            )
+            for sid, slot in sorted(sh.items(), key=lambda item: str(item[0])):
+                if not isinstance(slot, dict):
+                    continue
+                print(
+                    f"  [{sid}] {slot.get('id')!r} lc={slot.get('lc')!r} "
+                    f"on={slot.get('on')!r} of={slot.get('of')!r} "
+                    f"en={slot.get('en')!r} days={slot.get('dw')!r}"
+                )
+
         print("\n=== Diagnosis ===")
         for note in _diagnosis(rest_keys, ws_raw, state):
             print(f"- {note}")
+        if isinstance(sh, dict):
+            for slot in sh.values():
+                if (
+                    isinstance(slot, dict)
+                    and slot.get("lc") == "pool"
+                    and int(slot.get("en") or 0) == 1
+                ):
+                    print(
+                        f"- Panel schedule {slot.get('id')!r}: "
+                        f"{slot.get('on')} → {slot.get('of')} every day "
+                        f"in the controller timezone. Manual ON outside that "
+                        f"window may be turned back OFF by the panel."
+                    )
 
         if not (args.verify_echo or want_on or want_off):
             print(

@@ -26,7 +26,7 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 
 ## Install on your Home Assistant (Raspberry Pi)
 
-Current version: **1.4.1**
+Current version: **1.4.2**
 
 ### Option A — HACS (recommended)
 
@@ -38,11 +38,14 @@ Current version: **1.4.1**
 6. **Settings → Devices & services → Add integration → Jandy AquaLink TCX**
 7. Sign in with your iAquaLink / Jandy email + password
 
-To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.4.1"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.4.2"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+
+**v1.4.2**
+- Filter pump: HA Auto schedules are **ON-only** (never send filtration OFF). Manual ON was still getting yanked off ~10–15s later by idle schedule refresh.
+- Note: the TCX panel has its own `Pool Filtration` schedule (e.g. 09:00–21:00) that can still turn the pump off independently of HA.
 
 **v1.4.1**
-- Filter pump: idle Auto schedules no longer force the pump OFF after a manual ON (activity showed On→2500 RPM→Off in ~6s).
-- Added `scripts/tcx_pump_probe.py` for pump diagnose / `--on --i-know` debug.
+- Added `scripts/tcx_pump_probe.py`; first pass at not fighting manual pump ON.
 
 **v1.4.0**
 - Temperatures: honor `tempSetting` (°C vs °F).
