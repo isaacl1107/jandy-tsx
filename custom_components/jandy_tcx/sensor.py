@@ -32,6 +32,7 @@ async def async_setup_entry(
             TcxSwcSensor(coordinator),
             TcxScheduleSensor(coordinator, "heater"),
             TcxScheduleSensor(coordinator, "pump"),
+            TcxScheduleSensor(coordinator, "light"),
         ]
     )
 

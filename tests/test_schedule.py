@@ -63,3 +63,23 @@ def test_slots_from_config_and_next_transition():
     when = datetime(2026, 10, 5, 9, 0)
     nxt = next_transition(slots, "heater", when, looking_for=True)
     assert nxt == datetime(2026, 10, 5, 10, 0)
+
+
+def test_light_schedule_and_empty_defaults():
+    from custom_components.jandy_tcx.schedule import DEFAULT_SCHEDULES
+
+    assert DEFAULT_SCHEDULES == []
+    slots = [
+        ScheduleSlot(
+            id="l1",
+            target="light",
+            days=(5, 6),
+            start=time(19, 0),
+            end=time(23, 0),
+        )
+    ]
+    saturday_evening = datetime(2026, 10, 10, 20, 0)
+    saturday_afternoon = datetime(2026, 10, 10, 15, 0)
+    assert desired_states(slots, saturday_evening)["light"]["on"] is True
+    assert desired_states(slots, saturday_afternoon)["light"]["on"] is False
+    assert desired_states(slots, saturday_evening)["heater"]["on"] is False

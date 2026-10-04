@@ -1,4 +1,4 @@
-"""Weekly heater / pump schedule helpers for Jandy TCX."""
+"""Weekly equipment schedule helpers for Jandy TCX."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any, Literal
 
-ScheduleTarget = Literal["heater", "pump"]
+ScheduleTarget = Literal["heater", "pump", "light"]
+SCHEDULE_TARGETS: tuple[ScheduleTarget, ...] = ("heater", "pump", "light")
 
 
 @dataclass(frozen=True)
@@ -37,10 +38,13 @@ def parse_hhmm(value: str) -> time:
 
 
 def slot_from_dict(data: dict[str, Any]) -> ScheduleSlot:
+    target = str(data.get("target", "heater"))
+    if target not in SCHEDULE_TARGETS:
+        target = "heater"
     days = tuple(int(day) for day in data.get("days", list(range(7))))
     return ScheduleSlot(
         id=str(data["id"]),
-        target=data.get("target", "heater"),
+        target=target,  # type: ignore[arg-type]
         days=days,
         start=parse_hhmm(str(data["start"])),
         end=parse_hhmm(str(data["end"])),
@@ -62,10 +66,11 @@ def slots_from_config(raw: list[dict[str, Any]] | None) -> list[ScheduleSlot]:
 def desired_states(
     slots: list[ScheduleSlot], when: datetime
 ) -> dict[ScheduleTarget, dict[str, Any]]:
-    """Return desired heater/pump state from all active slots."""
+    """Return desired heater/pump/light state from all active slots."""
     result: dict[ScheduleTarget, dict[str, Any]] = {
         "heater": {"on": False, "setpoint_f": None},
         "pump": {"on": False},
+        "light": {"on": False},
     }
     for slot in slots:
         if not slot.active_at(when):
@@ -76,6 +81,8 @@ def desired_states(
                 result["heater"]["setpoint_f"] = slot.setpoint_f
         elif slot.target == "pump":
             result["pump"]["on"] = True
+        elif slot.target == "light":
+            result["light"]["on"] = True
     # Heater implies filtration for safety.
     if result["heater"]["on"]:
         result["pump"]["on"] = True
@@ -123,31 +130,5 @@ def next_transition(
     return None
 
 
-DEFAULT_SCHEDULES: list[dict[str, Any]] = [
-    {
-        "id": "weekday-heat",
-        "target": "heater",
-        "days": [0, 1, 2, 3, 4],
-        "start": "10:00",
-        "end": "18:00",
-        "enabled": True,
-        "setpoint_f": 84,
-    },
-    {
-        "id": "weekend-heat",
-        "target": "heater",
-        "days": [5, 6],
-        "start": "09:00",
-        "end": "20:00",
-        "enabled": True,
-        "setpoint_f": 86,
-    },
-    {
-        "id": "daily-filter",
-        "target": "pump",
-        "days": [0, 1, 2, 3, 4, 5, 6],
-        "start": "08:00",
-        "end": "12:00",
-        "enabled": True,
-    },
-]
+# New installs start with no schedules; users add them in Configure.
+DEFAULT_SCHEDULES: list[dict[str, Any]] = []

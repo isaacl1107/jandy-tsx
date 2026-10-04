@@ -45,6 +45,7 @@ DAY_OPTIONS = [
 TARGET_OPTIONS = [
     selector.SelectOptionDict(value="heater", label="Heater"),
     selector.SelectOptionDict(value="pump", label="Filter pump"),
+    selector.SelectOptionDict(value="light", label="Pool light"),
 ]
 
 STEP_USER = vol.Schema(

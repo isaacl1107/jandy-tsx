@@ -38,6 +38,13 @@ def _ensure_homeassistant_stubs() -> None:
     core.ServiceCall = object
     core.callback = lambda fn: fn
 
+    exceptions = module("homeassistant.exceptions")
+
+    class ConfigEntryNotReady(Exception):
+        pass
+
+    exceptions.ConfigEntryNotReady = ConfigEntryNotReady
+
     config_entries = module("homeassistant.config_entries")
 
     class _ConfigEntry:

@@ -50,13 +50,15 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 
 Schedules run **inside this integration** (no Node-RED / extra add-on).
 
+New installs start with **no schedules**. Add only what you want:
+
 1. Open the integration → **Configure**
 2. Choose **Manage schedules**
 3. **Add** / **Edit** / **Delete** weekly windows in the UI:
-   - Equipment: heater or filter pump
+   - Equipment: **heater**, **filter pump**, or **pool light**
    - Days of week
    - Start / end time
-   - Heater setpoint (°F)
+   - Heater setpoint (°F) when equipment is heater
    - Enabled toggle
 4. Choose **Save and finish**
 
@@ -66,6 +68,7 @@ Notes:
 - Overnight windows work (for example 22:00 → 06:00)
 - When a heater schedule is active, the filter pump is forced on (safe interlock)
 - Toggle **Auto schedule** off for full manual control
+- If you previously installed with sample schedules, delete them in **Manage schedules**
 
 Services:
 

@@ -77,6 +77,7 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
         desired = desired_states(slots, now)
         await self._maybe_set_pump(desired["pump"]["on"], state, now)
         await self._maybe_set_heater(desired["heater"], state, now)
+        await self._maybe_set_light(desired["light"]["on"], state, now)
 
     async def _maybe_set_pump(
         self, should_on: bool, state: TcxState, when: datetime
@@ -129,3 +130,20 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
             await self.client.async_set_heater_enabled(should_on)
 
         self._last_applied["heater"] = key
+
+    async def _maybe_set_light(
+        self, should_on: bool, state: TcxState, when: datetime
+    ) -> None:
+        key = ("light", should_on)
+        if self._last_applied.get("light") == key and state.light_on == should_on:
+            return
+        if state.light_on == should_on:
+            self._last_applied["light"] = key
+            return
+        _LOGGER.info(
+            "Schedule %s pool light at %s",
+            "enabling" if should_on else "disabling",
+            when.isoformat(),
+        )
+        await self.client.async_set_light(should_on)
+        self._last_applied["light"] = key
