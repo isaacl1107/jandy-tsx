@@ -18,13 +18,21 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: TcxCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        [
-            TcxPumpSwitch(coordinator),
-            TcxHeaterSwitch(coordinator),
-            TcxScheduleSwitch(coordinator),
-        ]
-    )
+    entities: list[SwitchEntity] = [
+        TcxPumpSwitch(coordinator),
+        TcxHeaterSwitch(coordinator),
+        TcxScheduleSwitch(coordinator),
+    ]
+    # Water feature appears when TCX reports a WF aux circuit.
+    if (
+        coordinator.data
+        and (
+            coordinator.data.water_feature_available
+            or coordinator.data.water_feature_key
+        )
+    ):
+        entities.append(TcxWaterFeatureSwitch(coordinator))
+    async_add_entities(entities)
 
 
 class TcxPumpSwitch(TcxEntity, SwitchEntity):
@@ -91,3 +99,34 @@ class TcxScheduleSwitch(TcxEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs) -> None:
         self.coordinator.schedule_enabled = False
         self.async_write_ha_state()
+
+
+class TcxWaterFeatureSwitch(TcxEntity, SwitchEntity):
+    _attr_translation_key = "water_feature"
+    _attr_icon = "mdi:fountain"
+
+    def __init__(self, coordinator: TcxCoordinator) -> None:
+        super().__init__(coordinator, "water_feature")
+        self._attr_name = coordinator.data.water_feature_name or "Water feature"
+
+    @property
+    def available(self) -> bool:
+        return bool(
+            self.coordinator.last_update_success
+            and (
+                self.coordinator.data.water_feature_available
+                or self.coordinator.data.water_feature_key
+            )
+        )
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.data.water_feature_on
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self.coordinator.client.async_set_water_feature(True)
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self.coordinator.client.async_set_water_feature(False)
+        await self.coordinator.async_request_refresh()

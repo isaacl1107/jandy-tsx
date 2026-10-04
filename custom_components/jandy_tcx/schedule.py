@@ -6,8 +6,13 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any, Literal
 
-ScheduleTarget = Literal["heater", "pump", "light"]
-SCHEDULE_TARGETS: tuple[ScheduleTarget, ...] = ("heater", "pump", "light")
+ScheduleTarget = Literal["heater", "pump", "light", "water_feature"]
+SCHEDULE_TARGETS: tuple[ScheduleTarget, ...] = (
+    "heater",
+    "pump",
+    "light",
+    "water_feature",
+)
 
 
 @dataclass(frozen=True)
@@ -66,11 +71,12 @@ def slots_from_config(raw: list[dict[str, Any]] | None) -> list[ScheduleSlot]:
 def desired_states(
     slots: list[ScheduleSlot], when: datetime
 ) -> dict[ScheduleTarget, dict[str, Any]]:
-    """Return desired heater/pump/light state from all active slots."""
+    """Return desired heater/pump/light/water-feature state from active slots."""
     result: dict[ScheduleTarget, dict[str, Any]] = {
         "heater": {"on": False, "setpoint_f": None},
         "pump": {"on": False},
         "light": {"on": False},
+        "water_feature": {"on": False},
     }
     for slot in slots:
         if not slot.active_at(when):
@@ -83,8 +89,10 @@ def desired_states(
             result["pump"]["on"] = True
         elif slot.target == "light":
             result["light"]["on"] = True
-    # Heater implies filtration for safety.
-    if result["heater"]["on"]:
+        elif slot.target == "water_feature":
+            result["water_feature"]["on"] = True
+    # Heater and water features need filtration running.
+    if result["heater"]["on"] or result["water_feature"]["on"]:
         result["pump"]["on"] = True
     return result
 
@@ -106,11 +114,11 @@ def next_transition(
         )
         # heater-implied pump is handled by callers via desired_states
         if target == "pump":
-            heater_on = any(
-                slot.target == "heater" and slot.active_at(probe)
+            pump_required = any(
+                slot.target in {"heater", "water_feature"} and slot.active_at(probe)
                 for slot in slots
             )
-            active = active or heater_on
+            active = active or pump_required
         if active == looking_for:
             if minutes == 0:
                 continue
@@ -120,11 +128,12 @@ def next_transition(
                 for slot in slots
             )
             if target == "pump":
-                prev_heater = any(
-                    slot.target == "heater" and slot.active_at(previous)
+                prev_required = any(
+                    slot.target in {"heater", "water_feature"}
+                    and slot.active_at(previous)
                     for slot in slots
                 )
-                prev_active = prev_active or prev_heater
+                prev_active = prev_active or prev_required
             if prev_active != looking_for:
                 return probe
     return None

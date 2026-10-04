@@ -33,6 +33,7 @@ async def async_setup_entry(
             TcxScheduleSensor(coordinator, "heater"),
             TcxScheduleSensor(coordinator, "pump"),
             TcxScheduleSensor(coordinator, "light"),
+            TcxScheduleSensor(coordinator, "water_feature"),
         ]
     )
 
@@ -78,7 +79,13 @@ class TcxScheduleSensor(TcxEntity, SensorEntity):
     def __init__(self, coordinator: TcxCoordinator, target: str) -> None:
         super().__init__(coordinator, f"schedule_{target}")
         self._target = target
-        self._attr_name = f"{target.title()} schedule"
+        label = {
+            "heater": "Heater",
+            "pump": "Pump",
+            "light": "Light",
+            "water_feature": "Water feature",
+        }.get(target, target.replace("_", " ").title())
+        self._attr_name = f"{label} schedule"
 
     @property
     def native_value(self) -> str:

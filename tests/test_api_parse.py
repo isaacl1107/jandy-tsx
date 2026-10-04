@@ -12,6 +12,10 @@ def test_parse_mock_reported():
     assert state.pump_on is True
     assert state.pump_rpm == 2400
     assert state.swc_percent == 50
+    assert state.water_feature_available is True
+    assert state.water_feature_key == "aux0"
+    assert state.water_feature_on is False
+    assert state.light_key == "aux1"
 
 
 def test_parse_tenths_and_heater_running():

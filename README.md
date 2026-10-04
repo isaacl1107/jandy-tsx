@@ -1,6 +1,6 @@
 # Jandy AquaLink TCX for Home Assistant
 
-Control and **auto-schedule** your Jandy AquaLink **TCX** pool heater, filter pump, and lights from Home Assistant — including on a **Raspberry Pi**.
+Control and **auto-schedule** your Jandy AquaLink **TCX** pool heater, filter pump, lights, and water feature from Home Assistant — including on a **Raspberry Pi**.
 
 This is a **custom integration** (not a Supervisor add-on). That matters because the popular [liptonj/hassio-addons](https://github.com/liptonj/hassio-addons) TCX client is **amd64-only** and will not install on Pi / ARM. This integration runs inside Home Assistant Core itself, so it works on:
 
@@ -15,6 +15,7 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 | `climate.*_heater` | Heater on/off + setpoint (°F) |
 | `switch.*_filter_pump` | Filter pump |
 | `switch.*_heater_enable` | Heater enable |
+| `switch.*_water_feature` | Water feature / waterfall (when TCX reports one) |
 | `switch.*_auto_schedule` | Pause / resume local schedules |
 | `number.*_heater_setpoint` | Setpoint slider |
 | `number.*_pump_rpm` | VSP speed |
@@ -55,7 +56,7 @@ New installs start with **no schedules**. Add only what you want:
 1. Open the integration → **Configure**
 2. Choose **Manage schedules**
 3. **Add** / **Edit** / **Delete** weekly windows in the UI:
-   - Equipment: **heater**, **filter pump**, or **pool light**
+   - Equipment: **heater**, **filter pump**, **pool light**, or **water feature**
    - Days of week
    - Start / end time
    - Heater setpoint (°F) when equipment is heater
@@ -66,7 +67,7 @@ Notes:
 
 - Times use your Home Assistant timezone
 - Overnight windows work (for example 22:00 → 06:00)
-- When a heater schedule is active, the filter pump is forced on (safe interlock)
+- When a heater or water-feature schedule is active, the filter pump is forced on (safe interlock)
 - Toggle **Auto schedule** off for full manual control
 - If you previously installed with sample schedules, delete them in **Manage schedules**
 

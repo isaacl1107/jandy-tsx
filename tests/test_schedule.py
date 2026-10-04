@@ -83,3 +83,18 @@ def test_light_schedule_and_empty_defaults():
     assert desired_states(slots, saturday_evening)["light"]["on"] is True
     assert desired_states(slots, saturday_afternoon)["light"]["on"] is False
     assert desired_states(slots, saturday_evening)["heater"]["on"] is False
+
+
+def test_water_feature_forces_pump():
+    slots = [
+        ScheduleSlot(
+            id="wf1",
+            target="water_feature",
+            days=(0,),
+            start=time(12, 0),
+            end=time(14, 0),
+        )
+    ]
+    noon = datetime(2026, 10, 5, 12, 30)
+    assert desired_states(slots, noon)["water_feature"]["on"] is True
+    assert desired_states(slots, noon)["pump"]["on"] is True

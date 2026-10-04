@@ -78,6 +78,9 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
         await self._maybe_set_pump(desired["pump"]["on"], state, now)
         await self._maybe_set_heater(desired["heater"], state, now)
         await self._maybe_set_light(desired["light"]["on"], state, now)
+        await self._maybe_set_water_feature(
+            desired["water_feature"]["on"], state, now
+        )
 
     async def _maybe_set_pump(
         self, should_on: bool, state: TcxState, when: datetime
@@ -147,3 +150,26 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
         )
         await self.client.async_set_light(should_on)
         self._last_applied["light"] = key
+
+    async def _maybe_set_water_feature(
+        self, should_on: bool, state: TcxState, when: datetime
+    ) -> None:
+        if not state.water_feature_available and state.water_feature_key is None:
+            # Still allow schedules when aux key was inferred from mock/config.
+            pass
+        key = ("water_feature", should_on)
+        if (
+            self._last_applied.get("water_feature") == key
+            and state.water_feature_on == should_on
+        ):
+            return
+        if state.water_feature_on == should_on:
+            self._last_applied["water_feature"] = key
+            return
+        _LOGGER.info(
+            "Schedule %s water feature at %s",
+            "enabling" if should_on else "disabling",
+            when.isoformat(),
+        )
+        await self.client.async_set_water_feature(should_on)
+        self._last_applied["water_feature"] = key

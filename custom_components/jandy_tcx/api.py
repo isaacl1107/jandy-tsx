@@ -72,6 +72,11 @@ class TcxState:
     light_on: bool = False
     light_color: int = 0
     light_name: str = "Pool Light"
+    light_key: str = "aux1"
+    water_feature_on: bool = False
+    water_feature_name: str = "Water feature"
+    water_feature_key: str | None = None
+    water_feature_available: bool = False
     swc_percent: int | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -93,6 +98,11 @@ class TcxState:
             "light_on": self.light_on,
             "light_color": self.light_color,
             "light_name": self.light_name,
+            "light_key": self.light_key,
+            "water_feature_on": self.water_feature_on,
+            "water_feature_name": self.water_feature_name,
+            "water_feature_key": self.water_feature_key,
+            "water_feature_available": self.water_feature_available,
             "swc_percent": self.swc_percent,
         }
 
@@ -193,21 +203,29 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
         except (TypeError, ValueError):
             pass
 
-    # Prefer a pool-light aux relay when present.
+    # Aux relays: water feature (WF) and pool light (POOL_LT / color light types).
     for key, value in reported.items():
-        if not key.startswith("aux") or not isinstance(value, dict):
+        if not key.startswith("aux") or key.startswith("auxz") or not isinstance(value, dict):
             continue
         app = str(value.get("app") or "")
         et = str(value.get("et") or "")
-        if app in {"POOL_LT", "POOL_LIGHT"} or et in {"JL", "IB", "HU", "WL"}:
+        fr = str(value.get("fr") or "").lower()
+        if app == "WF" or "waterfall" in fr or "water feature" in fr:
+            state.water_feature_available = True
+            state.water_feature_key = key
+            state.water_feature_on = int(value.get("st") or 0) == 1
+            state.water_feature_name = str(value.get("fr") or "Water feature")
+            continue
+        if app in {"POOL_LT", "POOL_LIGHT"} or et in {"JL", "IB", "HU"}:
+            state.light_key = key
             state.light_on = int(value.get("st") or 0) == 1
             state.light_color = int(value.get("currClr") or value.get("cmdClr") or 0)
             state.light_name = str(value.get("fr") or "Pool Light")
-            break
 
     for key in ("auxz0",):
         zig = reported.get(key)
-        if isinstance(zig, dict) and "st" in zig and not state.light_on:
+        if isinstance(zig, dict) and "st" in zig and state.light_key == "aux1":
+            state.light_key = key
             state.light_on = int(zig.get("st") or 0) == 1
             state.light_name = str(zig.get("fr") or "Pool Light")
 
@@ -254,6 +272,14 @@ def mock_reported(serial: str = "MOCKTCX01") -> dict[str, Any]:
             "st": 1,
             "en": 1,
             "fr": "Variable Speed Pump",
+        },
+        "aux0": {
+            "st": 0,
+            "en": 1,
+            "app": "WF",
+            "et": "WL",
+            "fr": "Water feature",
+            "ty": 4,
         },
         "aux1": {
             "st": 0,
@@ -823,14 +849,8 @@ class TcxClient:
         )
 
     async def async_set_light(self, on: bool, color: int | None = None) -> None:
-        # Prefer classic aux light when present in state.
-        aux_key = "aux1"
-        for key, value in self.get_state().raw.items():
-            if key.startswith("aux") and isinstance(value, dict):
-                app = str(value.get("app") or "")
-                if app in {"POOL_LT", "POOL_LIGHT"}:
-                    aux_key = key
-                    break
+        state = self.get_state()
+        aux_key = state.light_key or "aux1"
         delta: dict[str, Any] = {aux_key: {"st": 1 if on else 0}}
         await self._send_command(
             namespace=NAMESPACE_TCX,
@@ -843,6 +863,25 @@ class TcxClient:
                 action=ACTION_SET_AUX_LIGHT,
                 delta={aux_key: {"cmdClr": int(color)}},
             )
+
+    async def async_set_water_feature(self, on: bool) -> None:
+        state = self.get_state()
+        aux_key = state.water_feature_key
+        if not aux_key:
+            # Fall back to first WF-named aux, else aux0.
+            for key, value in state.raw.items():
+                if key.startswith("aux") and isinstance(value, dict):
+                    app = str(value.get("app") or "")
+                    fr = str(value.get("fr") or "").lower()
+                    if app == "WF" or "waterfall" in fr or "water feature" in fr:
+                        aux_key = key
+                        break
+            aux_key = aux_key or "aux0"
+        await self._send_command(
+            namespace=NAMESPACE_TCX,
+            action=ACTION_SET_AUX_STATE,
+            delta={aux_key: {"st": 1 if on else 0}},
+        )
 
     async def async_close(self) -> None:
         if self._ws_task is not None:

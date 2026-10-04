@@ -46,6 +46,7 @@ TARGET_OPTIONS = [
     selector.SelectOptionDict(value="heater", label="Heater"),
     selector.SelectOptionDict(value="pump", label="Filter pump"),
     selector.SelectOptionDict(value="light", label="Pool light"),
+    selector.SelectOptionDict(value="water_feature", label="Water feature"),
 ]
 
 STEP_USER = vol.Schema(
