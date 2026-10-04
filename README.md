@@ -26,7 +26,7 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 
 ## Install on your Home Assistant (Raspberry Pi)
 
-Current version: **1.3.9**
+Current version: **1.4.0**
 
 ### Option A — HACS (recommended)
 
@@ -38,9 +38,14 @@ Current version: **1.3.9**
 6. **Settings → Devices & services → Add integration → Jandy AquaLink TCX**
 7. Sign in with your iAquaLink / Jandy email + password
 
-To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.3.9"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.4.0"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
 
-**v1.3.9** fixes light/aux writes: Zodiac login nests `appClientId` under `cognitoPool`, and without that field websocket commands were sent with a bogus `clientToken` (cloud ignored them).
+**v1.4.0**
+- Temperatures: honor `tempSetting` (°C vs °F). Controllers in Celsius were showing ~28°F instead of ~83°F.
+- Filter pump / RPM: seed from websocket `filt`/`ecm` namespaces (missing from REST), push live WS updates into HA, and require a remote echo before treating a pump command as success.
+- Chlorinator: read `outputPcnt` (was looking for a non-existent `swc` field).
+
+**v1.3.9** fixed light/aux writes (`cognitoPool.appClientId` → real `clientToken`, `state.desired` wrapper).
 
 ### Local light probe (outside Home Assistant)
 

@@ -35,12 +35,47 @@ def test_parse_mock_reported():
 def test_parse_tenths_and_heater_running():
     reported = mock_reported()
     reported["TspBdy0"]["heatEnabled"] = True
-    reported["lvh1"]["en"] = 1
+    reported["lvh1"]["en"] = 6  # heating code
     reported["water"]["value"] = 825
     state = parse_reported(reported)
     assert state.water_temp_f == 82.5
     assert state.heater_enabled is True
     assert state.heater_running is True
+    assert state.temp_unit_celsius is False
+
+
+def test_parse_celsius_temp_setting_converts_to_f():
+    """tempSetting=0 means wire tenths are °C — HA always exposes °F."""
+    from custom_components.jandy_tcx.api import _wire_temp_to_f, _f_to_wire_temp
+
+    assert _wire_temp_to_f(283, celsius=True) == 82.9  # 28.3°C
+    assert _wire_temp_to_f(256, celsius=True) == 78.1  # 25.6°C
+    assert _f_to_wire_temp(89.1, celsius=True) == 317  # 31.7°C
+
+    reported = mock_reported()
+    reported["tempSetting"] = 0
+    reported["water"]["value"] = 283
+    reported["air"] = {"value": 256, "us": 1}
+    reported["TspBdy0"]["waterTempSet"] = 317
+    del reported["airTemp"]
+    state = parse_reported(reported)
+    assert state.temp_unit_celsius is True
+    assert state.water_temp_f == 82.9
+    assert state.air_temp_f == 78.1
+    assert state.heater_setpoint_f == 89.1
+
+
+def test_parse_pump_and_swc_from_live_shape():
+    reported = mock_reported()
+    reported["filt0"]["st"] = 1
+    reported["pool"]["st"] = 1
+    reported["ecm0"]["st"] = 1
+    reported["ecm0"]["cmdSpd"] = 2500
+    reported["swc0"] = {"outputPcnt": 0, "stdPoolPcnt": 40, "salinity": 30}
+    state = parse_reported(reported)
+    assert state.pump_on is True
+    assert state.pump_rpm == 2500
+    assert state.swc_percent == 0
 
 
 def test_light_fallback_when_labels_missing():
