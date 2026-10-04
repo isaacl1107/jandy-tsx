@@ -134,22 +134,55 @@ def _f_to_tenths(temp_f: float) -> int:
 
 def _merge_reported(payload: dict[str, Any]) -> dict[str, Any]:
     """Merge Authorization namespace-keyed payload or flat reported state."""
-    direct = (payload.get("state") or {}).get("reported")
-    if isinstance(direct, dict) and direct:
-        return dict(direct)
+    desired, reported = _extract_desired_reported(payload)
+    if reported:
+        return dict(reported)
+    if desired:
+        # Some streamer acks only carry desired; treat as a delta hint.
+        return dict(desired)
 
     merged: dict[str, Any] = {}
     for value in payload.values():
         if not isinstance(value, dict):
             continue
-        reported = (value.get("state") or {}).get("reported")
-        if isinstance(reported, dict):
-            merged.update(reported)
+        _desired, _reported = _extract_desired_reported(value)
+        if _reported:
+            merged.update(_reported)
+        elif _desired:
+            merged.update(_desired)
         elif "metadata" not in value and any(
             key in value for key in ("water", "filt0", "TspBdy0", "pool", "lvh1")
         ):
             merged.update(value)
     return merged
+
+
+def _extract_desired_reported(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return (desired, reported) dicts from a WS/REST shadow-shaped payload."""
+    state = payload.get("state")
+    if not isinstance(state, dict):
+        return {}, {}
+    desired = state.get("desired")
+    reported = state.get("reported")
+    return (
+        desired if isinstance(desired, dict) else {},
+        reported if isinstance(reported, dict) else {},
+    )
+
+
+def _summarize_aux(delta: dict[str, Any]) -> dict[str, Any]:
+    """Compact aux*/st summary for logs."""
+    out: dict[str, Any] = {}
+    for key, value in delta.items():
+        if key.startswith("aux") and isinstance(value, dict):
+            out[key] = {
+                "st": value.get("st"),
+                "cmdClr": value.get("cmdClr"),
+                "currClr": value.get("currClr"),
+            }
+    return out
 
 
 def _deep_merge(base: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
@@ -416,6 +449,7 @@ class TcxClient:
         self._ws_debug_frames: list[dict[str, Any]] = []
         self._session_client_token: str | None = None
         self._reported: dict[str, Any] = {}
+        self._desired: dict[str, Any] = {}
         self._listeners: list[Callable[[TcxState], None]] = []
         self._mock_state = mock_reported(serial or "MOCKTCX01")
 
@@ -518,21 +552,34 @@ class TcxClient:
             self._auth_token = auth_token
             self._user_id = str(user_id)
             self._refresh_token = oauth.get("RefreshToken")
+            cognito = body.get("cognitoPool") or {}
             self._app_client_id = (
-                oauth.get("appClientId")
+                (cognito.get("appClientId") if isinstance(cognito, dict) else None)
+                or oauth.get("appClientId")
                 or body.get("appClientId")
                 or oauth.get("ClientId")
+                or oauth.get("client_id")
             )
+            # Seed the WS clientToken the official apps send on every command.
+            # Without cognitoPool.appClientId we used to invent a random 3-part
+            # token and the cloud accepted Authorization but ignored writes.
+            self._session_client_token = None
+            if self._user_id and self._auth_token and self._app_client_id:
+                self._session_client_token = (
+                    f"{self._user_id}|{self._auth_token}|{self._app_client_id}"
+                )
             try:
                 expires_in = int(oauth.get("ExpiresIn", 3600))
             except (TypeError, ValueError):
                 expires_in = 3600
             self._token_expiry = time.monotonic() + max(60, expires_in - 300)
             _LOGGER.info(
-                "Zodiac login OK with %s/…%s for %s",
+                "Zodiac login OK with %s/…%s for %s (app_client_id=%s auth_token=%s)",
                 key_field,
                 api_key[-4:],
                 email,
+                "yes" if self._app_client_id else "no",
+                "yes" if self._auth_token else "no",
             )
             return body
 
@@ -769,9 +816,10 @@ class TcxClient:
         if self._user_id and self._auth_token and self._app_client_id:
             return f"{self._user_id}|{self._auth_token}|{self._app_client_id}"
         if self._user_id:
-            # Spec example shape: userId|random|random
-            return f"{self._user_id}|{uuid.uuid4().hex}|{uuid.uuid4().hex}"
-        return f"{uuid.uuid4().hex}|{uuid.uuid4().hex}|{uuid.uuid4().hex}"
+            # iaqualink-py fallback when Cognito appClientId is missing:
+            # two-part userId|<random>, not a fabricated 3-part token.
+            return f"{self._user_id}|{uuid.uuid4().hex}"
+        return f"{uuid.uuid4().hex}|{uuid.uuid4().hex}"
 
     @staticmethod
     def _find_client_token(value: Any) -> str | None:
@@ -967,59 +1015,99 @@ class TcxClient:
                 token.count("|") + 1,
             )
 
-        if len(self._ws_debug_frames) < 40:
-            # Keep a redacted structural sample for diagnostics.
-            sample = {
-                "service": frame.get("service"),
-                "namespace": frame.get("namespace"),
-                "action": frame.get("action"),
-                "payload": frame.get("payload")
-                if not isinstance(frame.get("payload"), dict)
-                else {
-                    key: (
-                        sorted(value.keys())
-                        if isinstance(value, dict)
-                        else type(value).__name__
-                    )
-                    for key, value in frame["payload"].items()
-                },
-            }
-            self._ws_debug_frames.append(sample)
-            _LOGGER.debug("TCX WS frame: %s", sample)
-
         payload = frame.get("payload")
         if not isinstance(payload, dict):
-            return
-        merged = _merge_reported(payload)
-        if not merged:
-            # Delta-style desired/reported nested under state
-            state = payload.get("state") or {}
-            for key in ("reported", "desired"):
-                chunk = state.get(key)
-                if isinstance(chunk, dict) and chunk:
-                    self._reported.update(chunk)
-                    self._notify()
-                    return
+            if len(self._ws_debug_frames) < 40:
+                self._ws_debug_frames.append(
+                    {
+                        "service": frame.get("service"),
+                        "namespace": frame.get("namespace"),
+                        "action": frame.get("action"),
+                        "payload": type(frame.get("payload")).__name__,
+                    }
+                )
             return
 
         service = str(frame.get("service") or "")
         if service == "ErrorStreamer" or payload.get("error"):
             _LOGGER.warning("TCX WS error frame: %s", frame)
+
+        # Flat StateStreamer/DataStreamer shadow deltas carry both desired and
+        # reported. Older code only kept reported when it was non-empty, which
+        # dropped command acks that only appeared under desired.
+        desired, reported = _extract_desired_reported(payload)
+        # Namespace-keyed deltas (same shape as Authorization) also appear on
+        # some streamer pushes — merge those trees too.
+        if not desired and not reported:
+            for value in payload.values():
+                if not isinstance(value, dict):
+                    continue
+                d_part, r_part = _extract_desired_reported(value)
+                if d_part:
+                    desired = _deep_merge(desired, d_part)
+                if r_part:
+                    reported = _deep_merge(reported, r_part)
+
+        if len(self._ws_debug_frames) < 40:
+            sample = {
+                "service": frame.get("service"),
+                "namespace": frame.get("namespace"),
+                "action": frame.get("action"),
+                "event": frame.get("event"),
+                "desired_aux": _summarize_aux(desired),
+                "reported_aux": _summarize_aux(reported),
+                "payload_keys": sorted(payload.keys()),
+            }
+            self._ws_debug_frames.append(sample)
+            _LOGGER.debug("TCX WS frame: %s", sample)
+
+        if service in {"StateStreamer", "DataStreamer", "EventStreamer"} or (
+            desired or reported
+        ):
+            if desired or reported:
+                _LOGGER.info(
+                    "TCX %s delta desired_aux=%s reported_aux=%s",
+                    service or "shadow",
+                    _summarize_aux(desired) or desired,
+                    _summarize_aux(reported) or {
+                        key: reported.get(key)
+                        for key in list(reported)[:8]
+                    },
+                )
+            elif service in {"StateStreamer", "DataStreamer", "EventStreamer"}:
+                _LOGGER.info(
+                    "TCX %s empty desired/reported (command likely rejected)",
+                    service,
+                )
+            if desired:
+                # AWS IoT clears accepted desired keys by pushing null; drop those.
+                clean_desired = {
+                    key: value
+                    for key, value in desired.items()
+                    if value is not None
+                }
+                if clean_desired:
+                    self._desired = _deep_merge(self._desired, clean_desired)
+                for key, value in desired.items():
+                    if value is None:
+                        self._desired.pop(key, None)
+            if reported:
+                self._reported = _deep_merge(self._reported, reported)
+                self._notify()
+            elif desired:
+                # Cloud accepted desired but device has not reported yet.
+                self._notify()
+            # Continue — Authorization frames also use namespace-keyed shape below.
+
+        merged = _merge_reported(payload)
+        if not merged and not desired and not reported:
+            return
+
         looks_like_auth = service == SERVICE_AUTHORIZATION or bool(
             _AUTH_NAMESPACE_KEYS.intersection(payload)
         )
-        # Authorization full-state replaces cache; streamer deltas merge.
-        if looks_like_auth and (
-            "aux" in str(merged.keys())
-            or "water" in merged
-            or "filt0" in merged
-            or "pib0" in payload
-            or service == SERVICE_AUTHORIZATION
-        ):
-            # Prefer merging so a sparse auth frame cannot wipe REST keys.
+        if looks_like_auth and merged:
             self._reported = _deep_merge(self._reported, merged)
-            # Only mark auth ready when useful device keys arrived — not on
-            # bare Authorization error frames.
             if (
                 any(key.startswith("aux") for key in merged)
                 or "water" in merged
@@ -1027,9 +1115,14 @@ class TcxClient:
                 or "ecm0" in merged
             ):
                 self._ws_auth_event.set()
-        else:
+            self._notify()
+        elif merged and service not in {
+            "StateStreamer",
+            "DataStreamer",
+            "EventStreamer",
+        }:
             self._reported = _deep_merge(self._reported, merged)
-        self._notify()
+            self._notify()
 
     async def _send_command(
         self,
@@ -1052,13 +1145,20 @@ class TcxClient:
             # Let the receive loop attach before we send.
             await asyncio.sleep(0)
 
+        # Live hardware (and robot/cyclonext examples) require the MQTT-style
+        # state.desired wrapper. Flat deltas with a valid clientToken still
+        # produced empty StateStreamer acks and never flipped aux.st.
+        if "state" in delta and isinstance(delta.get("state"), dict):
+            payload_body = dict(delta)
+        else:
+            payload_body = {"state": {"desired": delta}}
         frame = {
             "version": 1,
             "action": action,
             "namespace": namespace,
             "service": SERVICE_STATE_CONTROLLER,
             "target": self.serial,
-            "payload": {**delta, "clientToken": self._client_token()},
+            "payload": {**payload_body, "clientToken": self._client_token()},
         }
         _LOGGER.info(
             "TCX WS command %s/%s keys=%s optimistic=%s",
@@ -1071,7 +1171,12 @@ class TcxClient:
         if optimistic:
             # Deep-merge only — never replace an aux object with a bare {st: N}
             # stub (that wipes app/et/fr and breaks discovery).
-            self._reported = _deep_merge(self._reported, delta)
+            merge_delta = delta
+            if "state" in delta and isinstance(delta.get("state"), dict):
+                merge_delta = (delta["state"].get("desired") or {})
+                if not isinstance(merge_delta, dict):
+                    merge_delta = {}
+            self._reported = _deep_merge(self._reported, merge_delta)
             self._notify()
 
     def _apply_mock_delta(self, delta: dict[str, Any]) -> None:
@@ -1133,20 +1238,40 @@ class TcxClient:
         want_st: int,
         *,
         frames_before: int,
-        timeout: float = 6.0,
+        timeout: float = 10.0,
     ) -> bool:
-        """Wait for a *remote* aux.st change (new WS frames after the command)."""
+        """Wait for remote aux.st via reported (required for success)."""
         deadline = time.monotonic() + timeout
+        saw_desired = False
+        extended = False
         while time.monotonic() < deadline:
-            current = self._reported.get(aux_key)
-            got_frame = len(self._ws_debug_frames) > frames_before
+            got_frame = len(self._ws_debug_frames) > frames_before or self.mock
+            reported = self._reported.get(aux_key)
+            desired = self._desired.get(aux_key)
             if (
-                isinstance(current, dict)
-                and int(current.get("st") or 0) == want_st
-                and (got_frame or self.mock)
+                isinstance(reported, dict)
+                and int(reported.get("st") or 0) == want_st
+                and got_frame
             ):
                 return True
+            if (
+                isinstance(desired, dict)
+                and int(desired.get("st") or 0) == want_st
+                and got_frame
+            ):
+                saw_desired = True
+                # Cloud accepted desired — give the panel more time to report.
+                if not extended:
+                    deadline = max(deadline, time.monotonic() + 6.0)
+                    extended = True
             await asyncio.sleep(0.2)
+        if saw_desired:
+            _LOGGER.warning(
+                "TCX aux %s desired st=%s accepted by cloud but reported "
+                "never changed (device may have rejected or ignored it)",
+                aux_key,
+                want_st,
+            )
         return False
 
     async def async_set_light(self, on: bool, color: int | None = None) -> None:
@@ -1214,9 +1339,13 @@ class TcxClient:
 
         # Try documented + observed envelopes. Do NOT optimistic-merge — prior
         # runs showed setAuxState/tcx can be ignored while local state lied.
+        # Wire convention (iaqualink-py / protocol ref): WS payload is the
+        # inner desired delta plus clientToken, e.g. {"aux0":{"st":1},...}.
         simple = {aux_key: {"st": want_st}}
         with_color = {aux_key: {"st": want_st, "cmdClr": int(cmd_clr)}}
-        desired_wrap = {"state": {"desired": {aux_key: {"st": want_st}}}}
+        # liptonj /statecontrol body shape: {"desired": {...}} (no state wrap).
+        desired_only = {"desired": {aux_key: {"st": want_st}}}
+        state_desired = {"state": {"desired": {aux_key: {"st": want_st}}}}
         variants: list[tuple[str, str, dict[str, Any]]] = []
         if aux_key.startswith("auxz"):
             variants.extend(
@@ -1224,19 +1353,26 @@ class TcxClient:
                     (NAMESPACE_ZIGBEE, ACTION_SET_ZIGBEE_STATE, simple),
                     ("zig", ACTION_SET_ZIGBEE_STATE, simple),
                     ("zig", ACTION_SET_AUX_STATE, simple),
+                    ("zig", ACTION_SET_STATE, desired_only),
                 ]
             )
         else:
             variants.extend(
                 [
+                    # Live-confirmed on RJEB… hardware: setAuxState with the
+                    # MQTT-style state.desired wrapper + real clientToken.
+                    (NAMESPACE_TCX, ACTION_SET_AUX_STATE, state_desired),
+                    (NAMESPACE_TCX, ACTION_SET_STATE, state_desired),
                     (NAMESPACE_TCX, ACTION_SET_AUX_STATE, simple),
+                    (NAMESPACE_TCX, ACTION_SET_AUX_STATE, with_color),
                     (NAMESPACE_TCX, ACTION_SET_STATE, simple),
-                    (NAMESPACE_TCX, ACTION_SET_AUX_STATE, desired_wrap),
+                    (NAMESPACE_TCX, ACTION_SET_STATE, desired_only),
+                    (NAMESPACE_PIB, ACTION_SET_AUX_STATE, state_desired),
                     (NAMESPACE_PIB, ACTION_SET_AUX_STATE, simple),
-                    (NAMESPACE_PIB, ACTION_SET_STATE, simple),
                     (NAMESPACE_PIB, ACTION_SET_AUX_LIGHT, with_color),
-                    (NAMESPACE_PIB, ACTION_SET_AUX_LIGHT, {aux_key: {"cmdClr": int(cmd_clr)}}),
+                    # liptonj docs: light commands sometimes use namespace "zig".
                     ("zig", ACTION_SET_AUX_STATE, simple),
+                    ("zig", ACTION_SET_STATE, desired_only),
                     (NAMESPACE_ZIGBEE, ACTION_SET_ZIGBEE_STATE, simple),
                 ]
             )

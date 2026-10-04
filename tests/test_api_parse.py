@@ -1,7 +1,15 @@
 """Tests for TCX shadow parsing."""
 
+import asyncio
+
+import aiohttp
+import pytest
+
 from custom_components.jandy_tcx.api import (
+    TcxClient,
+    _extract_desired_reported,
     _merge_reported,
+    _summarize_aux,
     mock_reported,
     parse_reported,
 )
@@ -89,3 +97,95 @@ def test_merge_namespace_keyed_authorization_payload():
     assert state.light_key == "aux1"
     assert state.light_available is True
     assert state.water_temp_f == 82.0
+
+
+def test_extract_desired_reported_and_aux_summary():
+    desired, reported = _extract_desired_reported(
+        {
+            "state": {
+                "desired": {"aux0": {"st": 1}},
+                "reported": {"aux0": {"st": 0, "app": "POOL_LT"}},
+            }
+        }
+    )
+    assert desired["aux0"]["st"] == 1
+    assert reported["aux0"]["st"] == 0
+    assert _summarize_aux(desired) == {
+        "aux0": {"st": 1, "cmdClr": None, "currClr": None}
+    }
+
+
+@pytest.mark.asyncio
+async def test_login_reads_cognito_pool_app_client_id(monkeypatch):
+    """Real Zodiac login nests appClientId under cognitoPool, not oauth."""
+
+    class FakeResp:
+        status = 200
+
+        async def json(self, content_type=None):
+            return {
+                "id": 42,
+                "authentication_token": "AUTHTOKEN20CHARS!!",
+                "userPoolOAuth": {
+                    "IdToken": "id-token",
+                    "RefreshToken": "refresh",
+                    "ExpiresIn": 3600,
+                },
+                "cognitoPool": {"appClientId": "app-client-from-cognito"},
+            }
+
+        async def text(self):
+            return ""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class FakeSession:
+        def post(self, *args, **kwargs):
+            return FakeResp()
+
+    client = TcxClient(FakeSession(), "user@example.com", "secret")  # type: ignore[arg-type]
+    await client.async_login()
+    assert client._app_client_id == "app-client-from-cognito"
+    assert client._session_client_token == (
+        "42|AUTHTOKEN20CHARS!!|app-client-from-cognito"
+    )
+    assert client._client_token() == client._session_client_token
+
+
+@pytest.mark.asyncio
+async def test_streamer_desired_does_not_count_as_reported_success():
+    """Desired-only echo must not flip local reported.st (false PASS)."""
+    session = aiohttp.ClientSession()
+    try:
+        client = TcxClient(session, "a@b.c", "x", serial="RJEB01", mock=False)
+        client._reported = {
+            "aux0": {"st": 0, "app": "POOL_LT", "et": "JL", "fr": "Pool Light"}
+        }
+        client._ws_auth_event.set()
+        # Simulate a StateStreamer desired ack with empty reported.
+        await client._handle_ws_frame(
+            {
+                "service": "StateStreamer",
+                "payload": {
+                    "state": {
+                        "desired": {"aux0": {"st": 1}},
+                        "reported": {},
+                    },
+                    "metadata": {"desired": {}, "reported": {}},
+                    "version": 1,
+                    "timestamp": 1,
+                },
+            }
+        )
+        assert client._desired["aux0"]["st"] == 1
+        assert int((client._reported.get("aux0") or {}).get("st") or 0) == 0
+        ok = await client._async_wait_aux_remote(
+            "aux0", 1, frames_before=0, timeout=0.5
+        )
+        assert ok is False
+    finally:
+        await session.close()

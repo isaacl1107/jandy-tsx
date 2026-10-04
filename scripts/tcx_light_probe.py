@@ -110,7 +110,11 @@ async def _run(args: argparse.Namespace) -> int:
             )
         print("Logging in…")
         await client.async_login()
-        print("Login OK")
+        print(
+            "Login OK "
+            f"(app_client_id={'yes' if client._app_client_id else 'no'} "  # noqa: SLF001
+            f"session_token={'yes' if client._session_client_token else 'no'})"  # noqa: SLF001
+        )
 
         if not client.serial:
             devices = await client.async_list_tcx_devices()
@@ -132,6 +136,10 @@ async def _run(args: argparse.Namespace) -> int:
             reported = (shadow.get("state") or {}).get("reported") or {}
             print(f"REST reported keys: {sorted(reported)}")
             print(f"equipment flags: {reported.get('equipment')!r}")
+            print(
+                f"systemMode={reported.get('systemMode')!r} "
+                f"aws={reported.get('aws')!r}"
+            )
         except Exception as err:  # noqa: BLE001
             print(f"REST shadow failed: {err}")
 

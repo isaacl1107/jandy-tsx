@@ -26,7 +26,7 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 
 ## Install on your Home Assistant (Raspberry Pi)
 
-Current version: **1.3.8**
+Current version: **1.3.9**
 
 ### Option A — HACS (recommended)
 
@@ -38,7 +38,9 @@ Current version: **1.3.8**
 6. **Settings → Devices & services → Add integration → Jandy AquaLink TCX**
 7. Sign in with your iAquaLink / Jandy email + password
 
-To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.3.8"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux1`).
+To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.3.9"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+
+**v1.3.9** fixes light/aux writes: Zodiac login nests `appClientId` under `cognitoPool`, and without that field websocket commands were sent with a bogus `clientToken` (cloud ignored them).
 
 ### Local light probe (outside Home Assistant)
 
