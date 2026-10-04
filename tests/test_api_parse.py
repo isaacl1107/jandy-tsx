@@ -88,6 +88,45 @@ def test_light_fallback_when_labels_missing():
     assert state.light_available is True
 
 
+def test_aux_pump_name_counts_as_water_feature():
+    reported = mock_reported()
+    reported["aux0"] = {
+        "st": 1,
+        "en": 1,
+        "app": "AUX",
+        "fr": "Aux Pump",
+        "ty": 1,
+    }
+    state = parse_reported(reported)
+    assert state.water_feature_available is True
+    assert state.water_feature_key == "aux0"
+    assert state.water_feature_on is True
+    assert state.water_feature_name == "Aux Pump"
+    assert "aux0" in state.aux_circuits
+
+
+def test_generic_aux_exposed_and_light_only_panel():
+    reported = mock_reported()
+    # Live-style panel: light on aux0, no WF label — plus a spare aux2.
+    reported["aux0"] = {
+        "st": 0,
+        "en": 1,
+        "app": "POOL_LT",
+        "et": "JL",
+        "fr": "Pool Light",
+        "ty": 6,
+        "currClr": 4,
+    }
+    del reported["aux1"]
+    reported["aux2"] = {"st": 0, "en": 1, "fr": "Blower", "ty": 1}
+    state = parse_reported(reported)
+    assert state.light_key == "aux0"
+    assert state.water_feature_available is False
+    assert "aux2" in state.aux_circuits
+    assert state.aux_circuits["aux2"]["name"] == "Blower"
+    assert state.aux_circuits["aux2"]["kind"] == "aux"
+
+
 def test_merge_namespace_keyed_authorization_payload():
     """WS Authorization full-state is namespace-keyed (main/pib0/zig/…)."""
     payload = {

@@ -15,7 +15,8 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 | `climate.*_heater` | Heater on/off + setpoint (°F) |
 | `switch.*_filter_pump` | Filter pump |
 | `switch.*_heater_enable` | Heater enable |
-| `switch.*_water_feature` | Water feature / waterfall (when TCX reports one) |
+| `switch.*_water_feature` | Water feature / aux pump / waterfall (when TCX reports one) |
+| `switch.*_aux_*` | Other non-light aux relays (blower, etc.) |
 | `switch.*_auto_schedule` | Pause / resume local schedules |
 | `number.*_heater_setpoint` | Setpoint slider |
 | `number.*_pump_rpm` | VSP speed |
@@ -26,7 +27,7 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 
 ## Install on your Home Assistant (Raspberry Pi)
 
-Current version: **1.4.5**
+Current version: **1.4.6**
 
 ### Option A — HACS (recommended)
 
@@ -38,7 +39,11 @@ Current version: **1.4.5**
 6. **Settings → Devices & services → Add integration → Jandy AquaLink TCX**
 7. Sign in with your iAquaLink / Jandy email + password
 
-To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.4.5"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.4.6"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+
+**v1.4.6**
+- Switch icons change with on/off (`pump` / `fire` / `calendar` / `fountain`), matching the light’s state feedback.
+- Water feature / aux-pump switch is always registered and becomes available when the panel reports a matching aux (including late websocket discovery). Other non-light aux relays get their own switches.
 
 **v1.4.5**
 - Ownership-gated schedule OFF for **heater, filter pump, pool light, and water feature**: HA sends OFF at window end only if HA turned that equipment ON for the run. Manual toggles clear ownership.

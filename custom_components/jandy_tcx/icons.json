@@ -1,0 +1,36 @@
+{
+  "entity": {
+    "switch": {
+      "filter_pump": {
+        "default": "mdi:pump-off",
+        "state": {
+          "on": "mdi:pump"
+        }
+      },
+      "heater_enable": {
+        "default": "mdi:fire-off",
+        "state": {
+          "on": "mdi:fire"
+        }
+      },
+      "auto_schedule": {
+        "default": "mdi:calendar-remove",
+        "state": {
+          "on": "mdi:calendar-clock"
+        }
+      },
+      "water_feature": {
+        "default": "mdi:water-off",
+        "state": {
+          "on": "mdi:fountain"
+        }
+      },
+      "aux_circuit": {
+        "default": "mdi:electric-switch",
+        "state": {
+          "on": "mdi:electric-switch-closed"
+        }
+      }
+    }
+  }
+}

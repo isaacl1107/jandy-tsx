@@ -88,6 +88,8 @@ class TcxState:
     water_feature_name: str = "Water feature"
     water_feature_key: str | None = None
     water_feature_available: bool = False
+    # Non-light aux relays (waterfall / aux pump / generic), keyed by auxN.
+    aux_circuits: dict[str, dict[str, Any]] = field(default_factory=dict)
     swc_percent: int | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -117,6 +119,7 @@ class TcxState:
             "water_feature_name": self.water_feature_name,
             "water_feature_key": self.water_feature_key,
             "water_feature_available": self.water_feature_available,
+            "aux_circuits": self.aux_circuits,
             "swc_percent": self.swc_percent,
         }
 
@@ -234,6 +237,30 @@ def _deep_merge(base: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_WF_APPS = frozenset({"WF", "WATER_FEATURE", "WATERFALL", "FEATURE"})
+_WF_NAME_HINTS = (
+    "waterfall",
+    "water feature",
+    "waterfeature",
+    "water fall",
+    "aux pump",
+    "booster",
+    "fountain",
+    "feature pump",
+    "water feat",
+)
+
+
+def _is_water_feature_aux(*, app: str, fr: str, ty: int | None) -> bool:
+    """True for waterfall / aux-pump / water-feature aux relays."""
+    if app.upper() in _WF_APPS:
+        return True
+    # TCX AuxType 4 is commonly water feature (see mock + live panels).
+    if ty == 4:
+        return True
+    return any(hint in fr for hint in _WF_NAME_HINTS)
+
+
 def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
     """Parse a flat TCX reported tree into TcxState."""
     state = TcxState(serial=serial or str(reported.get("sn") or ""), raw=reported)
@@ -332,39 +359,55 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
         except (TypeError, ValueError):
             pass
 
-    # Aux relays (auxN) and Zigbee aux (auxzN): water feature + pool light.
+    # Aux relays (auxN) and Zigbee aux (auxzN): lights, water feature / aux
+    # pump, and any other non-light aux the panel reports.
     # Color-capable et values: JL / IB / PSS / HU (see TCX LightType).
     light_found = False
     for key, value in reported.items():
         if not key.startswith("aux") or not isinstance(value, dict):
             continue
+        if "st" not in value:
+            continue
         app = str(value.get("app") or "")
         et = str(value.get("et") or "")
-        fr = str(value.get("fr") or "").lower()
-        if app == "WF" or "waterfall" in fr or "water feature" in fr:
-            state.water_feature_available = True
-            state.water_feature_key = key
-            state.water_feature_on = int(value.get("st") or 0) == 1
-            state.water_feature_name = str(value.get("fr") or "Water feature")
-            continue
+        fr_raw = str(value.get("fr") or "")
+        fr = fr_raw.lower()
         try:
             ty = int(value.get("ty")) if value.get("ty") is not None else None
         except (TypeError, ValueError):
             ty = None
+
         is_color = app in {"POOL_LT", "POOL_LIGHT"} or et in {
             "JL",
             "IB",
             "PSS",
             "HU",
         }
-        # ty: 2=white light, 6=pool light (AuxType); et WL=white light.
+        # ty: 2=white light, 6=pool light (AuxType). Do NOT treat et=WL alone
+        # as light — water-feature aux often ships with et=WL.
         is_light = (
             is_color
-            or et == "WL"
             or ty in {2, 6}
             or "light" in fr
             or "lamp" in fr
         )
+        is_water_feature = _is_water_feature_aux(app=app, fr=fr, ty=ty)
+
+        if is_water_feature and not is_light:
+            state.water_feature_available = True
+            state.water_feature_key = key
+            state.water_feature_on = int(value.get("st") or 0) == 1
+            state.water_feature_name = fr_raw or "Water feature"
+            state.aux_circuits[key] = {
+                "key": key,
+                "name": state.water_feature_name,
+                "on": state.water_feature_on,
+                "kind": "water_feature",
+                "app": app,
+                "ty": ty,
+            }
+            continue
+
         if is_light:
             # Prefer wired aux color lights over Zigbee / name-only matches.
             if light_found:
@@ -379,24 +422,45 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
             state.light_key = key
             state.light_on = int(value.get("st") or 0) == 1
             state.light_color = int(value.get("currClr") or value.get("cmdClr") or 0)
-            state.light_name = str(value.get("fr") or "Pool Light")
+            state.light_name = fr_raw or "Pool Light"
             state.light_is_color = is_color or key.startswith("auxz")
             state.light_available = True
             light_found = True
+            continue
 
-    # Fallback: many TCX installs put the pool light on aux1 even when app/et
-    # labels are blank in a partial REST shadow.
+        # Generic aux relay (aux pump, blower, etc.).
+        name = fr_raw or key.replace("aux", "Aux ").replace("z", "Zigbee ")
+        on = int(value.get("st") or 0) == 1
+        state.aux_circuits[key] = {
+            "key": key,
+            "name": name.strip() or key,
+            "on": on,
+            "kind": "aux",
+            "app": app,
+            "ty": ty,
+        }
+
+    # Fallback: many TCX installs put the pool light on aux0/aux1 even when
+    # app/et labels are blank in a partial REST shadow. Prefer a still-untyped
+    # generic aux over leaving the light undiscovered.
     if not light_found:
         for key in ("aux1", "aux2", "aux0", "auxz0"):
             value = reported.get(key)
-            if not isinstance(value, dict):
+            if not isinstance(value, dict) or "st" not in value:
                 continue
             app = str(value.get("app") or "")
             fr = str(value.get("fr") or "").lower()
-            if app == "WF" or "waterfall" in fr or "water feature" in fr:
+            try:
+                ty = int(value.get("ty")) if value.get("ty") is not None else None
+            except (TypeError, ValueError):
+                ty = None
+            if _is_water_feature_aux(app=app, fr=fr, ty=ty):
                 continue
-            if "st" not in value:
+            circ = state.aux_circuits.get(key)
+            if circ and circ.get("kind") == "water_feature":
                 continue
+            # Reclaim an unlabeled generic aux as the pool light.
+            state.aux_circuits.pop(key, None)
             state.light_key = key
             state.light_on = int(value.get("st") or 0) == 1
             state.light_color = int(value.get("currClr") or value.get("cmdClr") or 0)
@@ -1587,24 +1651,53 @@ class TcxClient:
             f"for {aux_key}. Tried {len(variants)} websocket envelopes."
         )
 
-    async def async_set_water_feature(self, on: bool) -> None:
-        state = self.get_state()
-        aux_key = state.water_feature_key
-        if not aux_key:
-            # Fall back to first WF-named aux, else aux0.
-            for key, value in state.raw.items():
-                if key.startswith("aux") and isinstance(value, dict):
-                    app = str(value.get("app") or "")
-                    fr = str(value.get("fr") or "").lower()
-                    if app == "WF" or "waterfall" in fr or "water feature" in fr:
-                        aux_key = key
-                        break
-            aux_key = aux_key or "aux0"
+    async def async_set_aux(self, aux_key: str, on: bool) -> None:
+        """Toggle any auxN / auxzN relay."""
         await self._send_command(
             namespace=NAMESPACE_TCX,
             action=ACTION_SET_AUX_STATE,
             delta={aux_key: {"st": 1 if on else 0}},
         )
+
+    async def async_set_water_feature(self, on: bool) -> None:
+        state = self.get_state()
+        aux_key = state.water_feature_key
+        if not aux_key:
+            for key, circ in state.aux_circuits.items():
+                if circ.get("kind") == "water_feature":
+                    aux_key = key
+                    break
+        if not aux_key:
+            for key, value in state.raw.items():
+                if not key.startswith("aux") or not isinstance(value, dict):
+                    continue
+                if key == state.light_key:
+                    continue
+                app = str(value.get("app") or "")
+                fr = str(value.get("fr") or "").lower()
+                try:
+                    ty = int(value.get("ty")) if value.get("ty") is not None else None
+                except (TypeError, ValueError):
+                    ty = None
+                if _is_water_feature_aux(app=app, fr=fr, ty=ty):
+                    aux_key = key
+                    break
+        if not aux_key:
+            # Last resort: first non-light aux with an st field.
+            for key, value in state.raw.items():
+                if (
+                    key.startswith("aux")
+                    and isinstance(value, dict)
+                    and key != state.light_key
+                    and "st" in value
+                ):
+                    aux_key = key
+                    break
+        if not aux_key:
+            raise TcxApiError(
+                "No water feature / aux-pump circuit discovered on this TCX"
+            )
+        await self.async_set_aux(aux_key, on)
 
     async def async_close(self) -> None:
         await self._ws_close_quiet()
