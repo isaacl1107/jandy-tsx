@@ -116,15 +116,40 @@ class TcxCoordinator(DataUpdateCoordinator[TcxState]):
                 desired["water_feature"]["on"], state, now
             )
 
+    def mark_manual_pump(self, on: bool) -> None:
+        """Record a user toggle so idle schedules do not immediately fight it."""
+        self._last_applied["pump"] = ("pump", "manual", bool(on))
+
     async def _maybe_set_pump(
         self, should_on: bool, state: TcxState, when: datetime
     ) -> None:
         key = ("pump", should_on)
-        if self._last_applied.get("pump") == key and state.pump_on == should_on:
+        prev = self._last_applied.get("pump")
+        if prev == key and state.pump_on == should_on:
             return
         if state.pump_on == should_on:
-            self._last_applied["pump"] = key
+            # Keep a prior manual marker so an idle schedule cannot force-off
+            # a pump the user just enabled outside the schedule window.
+            if not (
+                isinstance(prev, tuple)
+                and len(prev) == 3
+                and prev[0] == "pump"
+                and prev[1] == "manual"
+            ):
+                self._last_applied["pump"] = key
             return
+
+        # Outside an active pump window, desired is False. Only auto-off when
+        # *this* schedule previously turned the pump on — never yank a manual
+        # ON (activity log showed On→2500 RPM→Off within ~6s from that fight).
+        if not should_on and prev != ("pump", True):
+            _LOGGER.debug(
+                "Skipping schedule pump-off at %s (prev=%s manual_or_idle)",
+                when.isoformat(),
+                prev,
+            )
+            return
+
         _LOGGER.info(
             "Schedule %s filter pump at %s",
             "enabling" if should_on else "disabling",

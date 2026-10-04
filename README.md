@@ -26,7 +26,7 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 
 ## Install on your Home Assistant (Raspberry Pi)
 
-Current version: **1.4.0**
+Current version: **1.4.1**
 
 ### Option A — HACS (recommended)
 
@@ -38,25 +38,35 @@ Current version: **1.4.0**
 6. **Settings → Devices & services → Add integration → Jandy AquaLink TCX**
 7. Sign in with your iAquaLink / Jandy email + password
 
-To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.4.0"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.4.1"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux0`).
+
+**v1.4.1**
+- Filter pump: idle Auto schedules no longer force the pump OFF after a manual ON (activity showed On→2500 RPM→Off in ~6s).
+- Added `scripts/tcx_pump_probe.py` for pump diagnose / `--on --i-know` debug.
 
 **v1.4.0**
-- Temperatures: honor `tempSetting` (°C vs °F). Controllers in Celsius were showing ~28°F instead of ~83°F.
-- Filter pump / RPM: seed from websocket `filt`/`ecm` namespaces (missing from REST), push live WS updates into HA, and require a remote echo before treating a pump command as success.
-- Chlorinator: read `outputPcnt` (was looking for a non-existent `swc` field).
+- Temperatures: honor `tempSetting` (°C vs °F).
+- Filter pump / RPM from websocket; chlorinator `outputPcnt`.
 
-**v1.3.9** fixed light/aux writes (`cognitoPool.appClientId` → real `clientToken`, `state.desired` wrapper).
+**v1.3.9** fixed light/aux writes (`cognitoPool.appClientId` + `state.desired`).
 
-### Local light probe (outside Home Assistant)
+### Local probes (outside Home Assistant)
 
 ```bash
 export TCX_EMAIL='your-iaqualink-email'
 export TCX_PASSWORD='your-iaqualink-password'
 export TCX_SERIAL='RJEB01050120260091'   # optional
-python3 scripts/tcx_light_probe.py -v
-```
 
-A real PASS requires discovering an aux circuit with labels (`app`/`et`/`fr`). A bare `aux1` with only `st` is an optimistic local stub and does **not** mean the physical light changed.
+# Light
+python3 scripts/tcx_light_probe.py -v
+
+# Pump — diagnose only (safe)
+python3 scripts/tcx_pump_probe.py -v
+# Pump — safe command-path test (re-sends current st)
+python3 scripts/tcx_pump_probe.py --verify-echo -v
+# Pump — real ON with frame-level debug
+python3 scripts/tcx_pump_probe.py --on --i-know -v
+```
 
 ### Option B — Manual copy
 
