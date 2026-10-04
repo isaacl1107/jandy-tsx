@@ -146,3 +146,30 @@ def next_transition(
 
 # New installs start with no schedules; users add them in Configure.
 DEFAULT_SCHEDULES: list[dict[str, Any]] = []
+
+# Sample slots seeded by early releases. User-created IDs are uuid hex, so
+# these three names only ever belonged to the old stock defaults.
+LEGACY_DEFAULT_SCHEDULE_IDS = frozenset(
+    {"weekday-heat", "weekend-heat", "daily-filter"}
+)
+
+
+def is_legacy_default_schedule(item: dict[str, Any]) -> bool:
+    """True for the stock sample schedules from early releases."""
+    return str(item.get("id", "")) in LEGACY_DEFAULT_SCHEDULE_IDS
+
+
+def strip_legacy_default_schedules(
+    raw: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop stock sample schedules. Returns (kept, removed_count)."""
+    if not raw:
+        return [], 0
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for item in raw:
+        if is_legacy_default_schedule(item):
+            removed += 1
+            continue
+        kept.append(dict(item))
+    return kept, removed

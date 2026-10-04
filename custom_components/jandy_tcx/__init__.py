@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -16,19 +17,60 @@ from .const import (
     CONF_EMAIL,
     CONF_MOCK,
     CONF_PASSWORD,
+    CONF_SCHEDULES,
     CONF_SERIAL,
     DOMAIN,
     PLATFORMS,
 )
 from .coordinator import TcxCoordinator
+from .schedule import strip_legacy_default_schedules
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS_TYPED = [Platform(p) for p in PLATFORMS]
 
 
+def _migrate_legacy_default_schedules(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Remove stock sample schedules seeded by early releases."""
+    data = dict(entry.data)
+    options = dict(entry.options)
+    removed_total = 0
+    update_kwargs: dict[str, Any] = {}
+
+    if CONF_SCHEDULES in data:
+        cleaned, removed = strip_legacy_default_schedules(
+            list(data.get(CONF_SCHEDULES) or [])
+        )
+        if removed:
+            data[CONF_SCHEDULES] = cleaned
+            update_kwargs["data"] = data
+            removed_total += removed
+
+    if CONF_SCHEDULES in options:
+        cleaned, removed = strip_legacy_default_schedules(
+            list(options.get(CONF_SCHEDULES) or [])
+        )
+        if removed:
+            options[CONF_SCHEDULES] = cleaned
+            update_kwargs["options"] = options
+            removed_total += removed
+
+    if not update_kwargs:
+        return
+
+    hass.config_entries.async_update_entry(entry, **update_kwargs)
+    _LOGGER.info(
+        "Removed %s legacy default schedule(s) from TCX config entry %s",
+        removed_total,
+        entry.entry_id,
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up TCX from a config entry."""
+    _migrate_legacy_default_schedules(hass, entry)
     session = async_get_clientsession(hass)
     client = TcxClient(
         session,

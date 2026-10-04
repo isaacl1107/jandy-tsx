@@ -115,3 +115,58 @@ def test_managed_targets_only_listed_equipment():
     assert managed_targets(slots) == {"heater"}
     # Light is not managed — schedules must not force it off.
     assert "light" not in managed_targets(slots)
+
+
+def test_strip_legacy_default_schedules():
+    from custom_components.jandy_tcx.schedule import (
+        LEGACY_DEFAULT_SCHEDULE_IDS,
+        strip_legacy_default_schedules,
+    )
+
+    raw = [
+        {
+            "id": "weekday-heat",
+            "target": "heater",
+            "days": [0, 1, 2, 3, 4],
+            "start": "10:00",
+            "end": "18:00",
+            "enabled": True,
+            "setpoint_f": 84,
+        },
+        {
+            "id": "weekend-heat",
+            "target": "heater",
+            "days": [5, 6],
+            "start": "09:00",
+            "end": "20:00",
+            "enabled": True,
+            "setpoint_f": 86,
+        },
+        {
+            "id": "daily-filter",
+            "target": "pump",
+            "days": [0, 1, 2, 3, 4, 5, 6],
+            "start": "08:00",
+            "end": "12:00",
+            "enabled": True,
+        },
+        {
+            "id": "abc123def0",
+            "target": "heater",
+            "days": [0, 1, 2, 3, 4],
+            "start": "10:00",
+            "end": "18:00",
+            "enabled": True,
+            "setpoint_f": 84,
+        },
+    ]
+    kept, removed = strip_legacy_default_schedules(raw)
+    assert removed == 3
+    assert LEGACY_DEFAULT_SCHEDULE_IDS == {
+        "weekday-heat",
+        "weekend-heat",
+        "daily-filter",
+    }
+    assert [item["id"] for item in kept] == ["abc123def0"]
+    assert strip_legacy_default_schedules([]) == ([], 0)
+    assert strip_legacy_default_schedules(None) == ([], 0)
