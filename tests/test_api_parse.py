@@ -35,6 +35,16 @@ def test_parse_tenths_and_heater_running():
     assert state.heater_running is True
 
 
+def test_light_fallback_when_labels_missing():
+    reported = mock_reported()
+    # Strip identifying light labels but keep aux1 present.
+    reported["aux1"] = {"st": 0, "en": 1, "fr": "Relay 1"}
+    del reported["aux0"]  # remove WF so it isn't confused
+    state = parse_reported(reported)
+    assert state.light_key == "aux1"
+    assert state.light_available is True
+
+
 def test_merge_namespace_keyed_authorization_payload():
     """WS Authorization full-state is namespace-keyed (main/pib0/zig/…)."""
     payload = {

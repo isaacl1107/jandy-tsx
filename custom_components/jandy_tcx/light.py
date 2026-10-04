@@ -54,19 +54,14 @@ class TcxPoolLight(TcxEntity, LightEntity):
 
     def __init__(self, coordinator: TcxCoordinator) -> None:
         super().__init__(coordinator, "pool_light")
-        self._attr_name = (
-            (coordinator.data.light_name if coordinator.data else None)
-            or "Pool light"
-        )
+        self._attr_name = "Pool light"
 
     @property
-    def available(self) -> bool:
+    def name(self) -> str:
         data = self.coordinator.data
-        return bool(
-            self.coordinator.last_update_success
-            and data
-            and (data.light_available or data.light_key)
-        )
+        if data and data.light_name:
+            return data.light_name
+        return "Pool light"
 
     @property
     def is_on(self) -> bool:

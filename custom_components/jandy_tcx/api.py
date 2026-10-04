@@ -224,13 +224,24 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
             state.water_feature_on = int(value.get("st") or 0) == 1
             state.water_feature_name = str(value.get("fr") or "Water feature")
             continue
+        try:
+            ty = int(value.get("ty")) if value.get("ty") is not None else None
+        except (TypeError, ValueError):
+            ty = None
         is_color = app in {"POOL_LT", "POOL_LIGHT"} or et in {
             "JL",
             "IB",
             "PSS",
             "HU",
         }
-        is_light = is_color or et == "WL" or "light" in fr or "lamp" in fr
+        # ty: 2=white light, 6=pool light (AuxType); et WL=white light.
+        is_light = (
+            is_color
+            or et == "WL"
+            or ty in {2, 6}
+            or "light" in fr
+            or "lamp" in fr
+        )
         if is_light:
             # Prefer wired aux color lights over Zigbee / name-only matches.
             if light_found:
@@ -249,6 +260,29 @@ def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
             state.light_is_color = is_color or key.startswith("auxz")
             state.light_available = True
             light_found = True
+
+    # Fallback: many TCX installs put the pool light on aux1 even when app/et
+    # labels are blank in a partial REST shadow.
+    if not light_found:
+        for key in ("aux1", "aux2", "aux0", "auxz0"):
+            value = reported.get(key)
+            if not isinstance(value, dict):
+                continue
+            app = str(value.get("app") or "")
+            fr = str(value.get("fr") or "").lower()
+            if app == "WF" or "waterfall" in fr or "water feature" in fr:
+                continue
+            if "st" not in value:
+                continue
+            state.light_key = key
+            state.light_on = int(value.get("st") or 0) == 1
+            state.light_color = int(value.get("currClr") or value.get("cmdClr") or 0)
+            state.light_name = str(value.get("fr") or "Pool Light")
+            state.light_is_color = bool(
+                value.get("currClr") is not None or value.get("cmdClr") is not None
+            )
+            state.light_available = True
+            break
 
     swc = reported.get("swc0") or {}
     if isinstance(swc, dict) and swc.get("swc") is not None:
@@ -899,18 +933,33 @@ class TcxClient:
                     app = str(value.get("app") or "")
                     et = str(value.get("et") or "")
                     fr = str(value.get("fr") or "").lower()
+                    try:
+                        ty = (
+                            int(value.get("ty"))
+                            if value.get("ty") is not None
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        ty = None
                     if (
                         app in {"POOL_LT", "POOL_LIGHT"}
                         or et in {"JL", "IB", "PSS", "HU", "WL"}
+                        or ty in {2, 6}
                         or "light" in fr
                         or "lamp" in fr
                     ):
                         aux_key = key
                         break
         if not aux_key:
-            raise TcxApiError(
-                "No pool light aux circuit discovered yet. "
-                "Wait for websocket Authorization state, then try again."
+            # Last resort so the entity stays controllable while discovery catches up.
+            for key in ("aux1", "aux2", "aux0", "auxz0"):
+                if isinstance(state.raw.get(key), dict):
+                    aux_key = key
+                    break
+            aux_key = aux_key or "aux1"
+            _LOGGER.warning(
+                "TCX light aux not discovered yet; commanding %s as fallback",
+                aux_key,
             )
 
         _LOGGER.info(
