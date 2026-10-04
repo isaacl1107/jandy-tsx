@@ -15,7 +15,6 @@ from typing import Any, Callable
 import aiohttp
 
 from .const import (
-    ACTION_GET_STATE,
     ACTION_SET_AUX_LIGHT,
     ACTION_SET_AUX_STATE,
     ACTION_SET_FILTER_PUMP_STATE,
@@ -39,8 +38,6 @@ from .const import (
     SERVICE_AUTHORIZATION,
     SERVICE_STATE_CONTROLLER,
     SHADOW_URL,
-    SUB_SHADOW_URL,
-    SUB_SHADOW_URL_V2,
     TEMP_SCALE,
     USER_AGENT,
     USER_AGENT_MOBILE,
@@ -153,6 +150,18 @@ def _merge_reported(payload: dict[str, Any]) -> dict[str, Any]:
         ):
             merged.update(value)
     return merged
+
+
+def _deep_merge(base: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge delta into a copy of base (delta wins on leaves)."""
+    out = dict(base)
+    for key, value in delta.items():
+        existing = out.get(key)
+        if isinstance(value, dict) and isinstance(existing, dict):
+            out[key] = _deep_merge(existing, value)
+        else:
+            out[key] = value
+    return out
 
 
 def parse_reported(reported: dict[str, Any], *, serial: str = "") -> TcxState:
@@ -746,133 +755,11 @@ class TcxClient:
         reported = (body.get("state") or {}).get("reported") or {}
         if isinstance(reported, dict) and reported:
             # Merge — never wipe WS-only keys (aux from pib0, auxz from zig, ecm…).
-            self._reported = {**self._reported, **reported}
+            self._reported = _deep_merge(self._reported, reported)
             self._notify()
-        # Pull PIB/Zigbee sub-shadows when equipment flags say they exist.
-        # Main REST shadow often omits aux/lights entirely.
-        await self._async_fetch_equipment_subshadows(reported)
+        # REST sub-shadow GETs return 401 on real hardware; aux/lights come
+        # exclusively from the websocket Authorization full-state push.
         return body
-
-    async def _async_fetch_equipment_subshadows(
-        self, reported: dict[str, Any] | None = None
-    ) -> None:
-        """Best-effort REST fetch of sub-shadows listed under equipment."""
-        if self.mock:
-            return
-        source = reported if isinstance(reported, dict) else self._reported
-        equipment = source.get("equipment")
-        if not isinstance(equipment, dict) or not equipment:
-            # Still try the common light-bearing suffixes.
-            suffixes = ("_pib0", "_zig", "_filt", "_ecm")
-        else:
-            mapping = {
-                "pib0": "_pib0",
-                "zig": "_zig",
-                "filt": "_filt",
-                "ecm": "_ecm",
-                "fea": "_fea",
-                "swc": "_swc",
-            }
-            suffixes = tuple(
-                mapping[key] for key in mapping if key in equipment
-            ) or ("_pib0", "_zig")
-
-        token = await self._ensure_token()
-        timeout = aiohttp.ClientTimeout(total=20)
-        for suffix in suffixes:
-            for url_template, use_sig in (
-                (SUB_SHADOW_URL, False),
-                (SUB_SHADOW_URL_V2, True),
-            ):
-                url = url_template.format(serial=self.serial, suffix=suffix)
-                headers = {
-                    "Authorization": token,
-                    "Accept": "application/json",
-                    "User-Agent": USER_AGENT,
-                }
-                params: dict[str, str] = {}
-                if use_sig and self._user_id:
-                    params["signature"] = self._sign(
-                        [f"{self.serial}{suffix}".upper(), str(self._user_id)]
-                    )
-                    # Also try serial-only signature variants below on failure.
-                try:
-                    async with self._session.get(
-                        url, headers=headers, params=params or None, timeout=timeout
-                    ) as resp:
-                        text = await resp.text()
-                        if resp.status >= 400:
-                            _LOGGER.debug(
-                                "Sub-shadow %s via %s failed (%s): %s",
-                                suffix,
-                                "v2" if use_sig else "v1",
-                                resp.status,
-                                text[:120],
-                            )
-                            continue
-                        try:
-                            body = json.loads(text)
-                        except json.JSONDecodeError:
-                            continue
-                except (aiohttp.ClientError, TimeoutError) as err:
-                    _LOGGER.debug("Sub-shadow %s transport error: %s", suffix, err)
-                    continue
-
-                chunk = (body.get("state") or {}).get("reported")
-                if not isinstance(chunk, dict) or not chunk:
-                    # Some sub-shadows return the object at the root.
-                    if isinstance(body, dict) and any(
-                        key.startswith(("aux", "filt", "ecm", "water"))
-                        for key in body
-                    ):
-                        chunk = body
-                    else:
-                        continue
-                _LOGGER.info(
-                    "Merged sub-shadow %s (%d keys)", suffix, len(chunk)
-                )
-                self._reported.update(chunk)
-                self._notify()
-                break  # success for this suffix
-
-    async def async_set_desired(
-        self, delta: dict[str, Any], *, suffix: str = ""
-    ) -> None:
-        """POST a desired-state delta via REST shadow (write fallback)."""
-        if self.mock:
-            self._apply_mock_delta(delta)
-            self._notify()
-            return
-        token = await self._ensure_token()
-        if suffix:
-            url = SUB_SHADOW_URL_V2.format(serial=self.serial, suffix=suffix)
-        else:
-            url = SHADOW_URL.format(serial=self.serial)
-        headers = {
-            "Authorization": token,
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
-        }
-        payload = {"state": {"desired": delta}}
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with self._session.post(
-            url, json=payload, headers=headers, timeout=timeout
-        ) as resp:
-            text = await resp.text()
-            if resp.status >= 400:
-                raise TcxApiError(
-                    f"Shadow desired POST {suffix or 'main'} failed "
-                    f"({resp.status}): {text[:200]}"
-                )
-        # Optimistic merge of desired into local reported for UI.
-        for key, value in delta.items():
-            existing = self._reported.get(key)
-            if isinstance(existing, dict) and isinstance(value, dict):
-                existing.update(value)
-            else:
-                self._reported[key] = value
-        self._notify()
 
     def _client_token(self) -> str:
         if self._user_id and self._auth_token and self._app_client_id:
@@ -916,17 +803,6 @@ class TcxClient:
                     "target": self.serial,
                 }
                 await self._ws.send_json(subscribe)
-                # Explicit full-state request used by the official client.
-                await self._ws.send_json(
-                    {
-                        "action": ACTION_GET_STATE,
-                        "version": 1,
-                        "namespace": NAMESPACE_AUTHORIZATION,
-                        "service": SERVICE_AUTHORIZATION,
-                        "target": self.serial,
-                        "payload": {"clientToken": self._client_token()},
-                    }
-                )
                 freshly_connected = True
 
         # Authorization full-state carries aux/lights from pib0 + zig namespaces.
@@ -936,7 +812,7 @@ class TcxClient:
             except TimeoutError:
                 _LOGGER.warning(
                     "TCX websocket Authorization state not received within 12s "
-                    "(%d frames seen); trying REST sub-shadows for aux/lights",
+                    "(%d frames seen)",
                     len(self._ws_debug_frames),
                 )
                 for frame in self._ws_debug_frames[:8]:
@@ -948,10 +824,6 @@ class TcxClient:
                         if isinstance(frame.get("payload"), dict)
                         else type(frame.get("payload")).__name__,
                     )
-                try:
-                    await self._async_fetch_equipment_subshadows()
-                except Exception:  # noqa: BLE001
-                    _LOGGER.debug("Sub-shadow fallback failed", exc_info=True)
 
     async def _ws_receive_loop(self) -> None:
         assert self._ws is not None
@@ -1012,6 +884,8 @@ class TcxClient:
             return
 
         service = str(frame.get("service") or "")
+        if service == "ErrorStreamer" or payload.get("error"):
+            _LOGGER.warning("TCX WS error frame: %s", frame)
         looks_like_auth = service == SERVICE_AUTHORIZATION or bool(
             _AUTH_NAMESPACE_KEYS.intersection(payload)
         )
@@ -1057,15 +931,16 @@ class TcxClient:
             "target": self.serial,
             "payload": {**delta, "clientToken": self._client_token()},
         }
+        _LOGGER.info(
+            "TCX WS command %s/%s keys=%s",
+            namespace,
+            action,
+            list(delta.keys()),
+        )
         await self._ws.send_json(frame)
-        # Optimistic local merge so the UI feels responsive.
-        self._reported.update(delta if all(isinstance(v, dict) for v in delta.values()) else {})
-        for key, value in delta.items():
-            existing = self._reported.get(key)
-            if isinstance(existing, dict) and isinstance(value, dict):
-                existing.update(value)
-            else:
-                self._reported[key] = value
+        # Deep-merge only — never replace an aux object with a bare {st: N}
+        # stub (that wipes app/et/fr and breaks discovery).
+        self._reported = _deep_merge(self._reported, delta)
         self._notify()
 
     def _apply_mock_delta(self, delta: dict[str, Any]) -> None:
@@ -1121,6 +996,25 @@ class TcxClient:
             delta={"ecm0": {"cmdSpd": int(rpm)}},
         )
 
+    async def _async_wait_aux_state(
+        self, aux_key: str, want_st: int, *, timeout: float = 8.0
+    ) -> bool:
+        """Wait for reported aux.st to match (from WS push or optimistic merge)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            current = self._reported.get(aux_key)
+            if isinstance(current, dict) and int(current.get("st") or 0) == want_st:
+                # Prefer a "real" aux object when possible, but accept st match.
+                return True
+            await asyncio.sleep(0.25)
+        _LOGGER.warning(
+            "TCX aux %s did not report st=%s within %.1fs",
+            aux_key,
+            want_st,
+            timeout,
+        )
+        return False
+
     async def async_set_light(self, on: bool, color: int | None = None) -> None:
         """Toggle pool light.
 
@@ -1173,62 +1067,31 @@ class TcxClient:
 
         delta = {aux_key: {"st": 1 if on else 0}}
 
-        # On/off: confirmed wire path is setAuxState / setZigbeeState (not setAuxLight).
-        ws_error: Exception | None = None
-        try:
-            if aux_key.startswith("auxz"):
-                await self._send_command(
-                    namespace=NAMESPACE_ZIGBEE,
-                    action=ACTION_SET_ZIGBEE_STATE,
-                    delta=delta,
-                )
-            else:
-                await self._send_command(
-                    namespace=NAMESPACE_TCX,
-                    action=ACTION_SET_AUX_STATE,
-                    delta=delta,
-                )
-        except Exception as err:  # noqa: BLE001
-            ws_error = err
-            _LOGGER.warning("TCX light WS command failed: %s", err)
-
-        # REST desired-state fallback — lights live on the PIB sub-shadow.
-        if not aux_key.startswith("auxz"):
-            for suffix in ("_pib0", ""):
-                try:
-                    await self.async_set_desired(delta, suffix=suffix)
-                    _LOGGER.info(
-                        "TCX light REST desired posted to %s",
-                        suffix or "main",
-                    )
-                    break
-                except TcxApiError as err:
-                    _LOGGER.debug(
-                        "TCX light REST desired %s failed: %s",
-                        suffix or "main",
-                        err,
-                    )
-            else:
-                if ws_error is not None:
-                    raise TcxApiError(
-                        f"Light command failed over WS and REST: {ws_error}"
-                    ) from ws_error
+        # On/off: confirmed wire path is setAuxState / setZigbeeState.
+        # REST desired POSTs need AWS SigV4 and are not used.
+        if aux_key.startswith("auxz"):
+            await self._send_command(
+                namespace=NAMESPACE_ZIGBEE,
+                action=ACTION_SET_ZIGBEE_STATE,
+                delta=delta,
+            )
+        else:
+            await self._send_command(
+                namespace=NAMESPACE_TCX,
+                action=ACTION_SET_AUX_STATE,
+                delta=delta,
+            )
 
         # Color is a separate PIB command; wire index is 1-based.
         if on and color is not None and not aux_key.startswith("auxz"):
-            color_delta = {aux_key: {"cmdClr": int(color)}}
-            try:
-                await self._send_command(
-                    namespace=NAMESPACE_PIB,
-                    action=ACTION_SET_AUX_LIGHT,
-                    delta=color_delta,
-                )
-            except Exception:  # noqa: BLE001
-                _LOGGER.debug("setAuxLight WS failed; trying REST", exc_info=True)
-                try:
-                    await self.async_set_desired(color_delta, suffix="_pib0")
-                except TcxApiError:
-                    _LOGGER.debug("setAuxLight REST failed", exc_info=True)
+            await self._send_command(
+                namespace=NAMESPACE_PIB,
+                action=ACTION_SET_AUX_LIGHT,
+                delta={aux_key: {"cmdClr": int(color)}},
+            )
+
+        # Wait briefly for a cloud/device echo of the new st value.
+        await self._async_wait_aux_state(aux_key, 1 if on else 0, timeout=8.0)
 
     async def async_set_water_feature(self, on: bool) -> None:
         state = self.get_state()

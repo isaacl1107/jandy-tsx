@@ -64,7 +64,7 @@ def _dump_aux(raw: dict) -> None:
             f"currClr={value.get('currClr')!r}"
         )
     if not found:
-        print("  (none — REST shadow may be incomplete; WS Authorization needed)")
+        print("  (none — waiting for websocket Authorization / pib0)")
 
 
 def _is_real_aux(value: dict | None) -> bool:
@@ -117,13 +117,12 @@ async def _run(args: argparse.Namespace) -> int:
             client.serial = str(devices[0]["serial_number"])
             print(f"Using serial {client.serial}")
 
-        print("Fetching REST shadow (+ equipment sub-shadows)…")
+        print("Fetching REST shadow (main only; aux comes from websocket)…")
         try:
             shadow = await client.async_get_shadow()
             reported = (shadow.get("state") or {}).get("reported") or {}
             print(f"REST reported keys: {sorted(reported)}")
-            equipment = reported.get("equipment")
-            print(f"equipment flags: {equipment!r}")
+            print(f"equipment flags: {reported.get('equipment')!r}")
         except Exception as err:  # noqa: BLE001
             print(f"REST shadow failed: {err}")
 
@@ -164,38 +163,32 @@ async def _run(args: argparse.Namespace) -> int:
             await client.async_close()
             return 0 if state.light_available else 1
 
-        want_on = not args.off
-        before_key = state.light_key
-        before_real = _is_real_aux(
-            state.raw.get(before_key) if before_key else None
-        )
+        if not state.light_available or not state.light_key:
+            print(
+                "\nRESULT: FAIL — light circuit not discovered from websocket "
+                "Authorization (expected aux0 POOL_LT on this controller).",
+                file=sys.stderr,
+            )
+            await client.async_close()
+            return 1
 
-        print(f"\nSending light {'ON' if want_on else 'OFF'}…")
+        want_on = not args.off
+        aux_key = state.light_key
+        print(f"\nSending light {'ON' if want_on else 'OFF'} via {aux_key}…")
         try:
             await client.async_set_light(want_on)
-            print("Command path finished (WS setAuxState + REST desired fallback).")
+            print("Command finished (websocket setAuxState).")
         except Exception as err:  # noqa: BLE001
             print(f"Command FAILED: {err}", file=sys.stderr)
             await client.async_close()
             return 1
 
-        # Drop optimistic stubs so verification only trusts cloud echo.
-        for key in list(client._reported):  # noqa: SLF001
-            if key.startswith("aux") and not _is_real_aux(client._reported[key]):
-                del client._reported[key]
-
-        print("Waiting 5s for controller / cloud echo…")
-        await asyncio.sleep(5)
-        try:
-            await client.async_get_shadow()
-        except Exception:  # noqa: BLE001
-            pass
-        # Give WS another moment after REST.
-        await asyncio.sleep(2)
+        # Keep WS open and watch for echo — do NOT re-fetch REST (no aux there).
+        print("Watching websocket for 8s for device echo…")
+        await asyncio.sleep(8)
 
         after = client.get_state()
-        aux_key = after.light_key or before_key or "aux1"
-        raw_aux = after.raw.get(aux_key) if aux_key else None
+        raw_aux = after.raw.get(aux_key)
         real = _is_real_aux(raw_aux if isinstance(raw_aux, dict) else None)
         print("\n=== Light state after command ===")
         print(
@@ -204,24 +197,26 @@ async def _run(args: argparse.Namespace) -> int:
                     "light_key": after.light_key,
                     "light_on": after.light_on,
                     "aux_looks_real": real,
-                    "discovered_before_command": before_real,
                     "raw_st": (raw_aux or {}).get("st")
                     if isinstance(raw_aux, dict)
                     else None,
                     "raw_fr": (raw_aux or {}).get("fr")
                     if isinstance(raw_aux, dict)
                     else None,
+                    "ws_frames_total": len(client._ws_debug_frames),  # noqa: SLF001
                 },
                 indent=2,
             )
         )
         _dump_aux(after.raw)
+        if client._ws_debug_frames:  # noqa: SLF001
+            print("\n=== WS frames (incl. post-command) ===")
+            print(json.dumps(client._ws_debug_frames, indent=2))  # noqa: SLF001
 
         if not real:
             print(
-                "\nRESULT: FAIL — never discovered a real aux/light circuit "
-                "(websocket Authorization / sub-shadows still empty). "
-                "The earlier 'PASS' with bare aux1 was a false optimistic update."
+                "\nRESULT: FAIL — lost aux discovery after command "
+                "(should not happen with deep-merge fix)."
             )
             await client.async_close()
             return 1
@@ -229,9 +224,10 @@ async def _run(args: argparse.Namespace) -> int:
         ok = after.light_on is want_on
         print(
             "\nRESULT:",
-            "PASS — cloud reported state matches request"
+            "PASS — reported light state matches request "
+            "(confirm the physical light also changed)"
             if ok
-            else "FAIL — cloud still reports the opposite state",
+            else "FAIL — reported state did not match; check WS error frames above",
         )
         await client.async_close()
         return 0 if ok else 1

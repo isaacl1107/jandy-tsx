@@ -14,10 +14,6 @@ REFRESH_URL = "https://prod.zodiac-io.com/users/v1/refresh"
 DEVICES_URL = "https://r-api.iaqualink.net/v2/devices.json"
 DEVICES_URL_LEGACY = "https://r-api.iaqualink.net/devices.json"
 SHADOW_URL = "https://prod.zodiac-io.com/devices/v2/{serial}/shadow"
-# Sub-shadow documents (pib0 carries aux/lights). Some accounts need these
-# when the websocket Authorization full-state push is delayed.
-SUB_SHADOW_URL = "https://prod.zodiac-io.com/devices/v1/{serial}{suffix}/shadow"
-SUB_SHADOW_URL_V2 = "https://prod.zodiac-io.com/devices/v2/{serial}{suffix}/shadow"
 WS_URL = "wss://prod-socket.zodiac-io.com/devices"
 USER_AGENT = "okhttp/3.14.7"
 # Mobile app UA — some websocket gateways are picky.
@@ -43,7 +39,6 @@ SERVICE_AUTHORIZATION = "Authorization"
 SERVICE_STATE_CONTROLLER = "StateController"
 
 ACTION_SUBSCRIBE = "subscribe"
-ACTION_GET_STATE = "getState"
 ACTION_SET_FILTER_PUMP_STATE = "setFilterPumpState"
 ACTION_SET_HEAT_ENABLED = "setHeatEnabled"
 ACTION_SET_WATER_TEMP_SETPOINT = "setWaterTempSetpoint"
