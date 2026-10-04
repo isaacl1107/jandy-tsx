@@ -26,7 +26,7 @@ This is a **custom integration** (not a Supervisor add-on). That matters because
 
 ## Install on your Home Assistant (Raspberry Pi)
 
-Current version: **1.3.6**
+Current version: **1.3.7**
 
 ### Option A — HACS (recommended)
 
@@ -38,7 +38,7 @@ Current version: **1.3.6**
 6. **Settings → Devices & services → Add integration → Jandy AquaLink TCX**
 7. Sign in with your iAquaLink / Jandy email + password
 
-To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.3.6"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux1`).
+To confirm the update took effect, check `custom_components/jandy_tcx/manifest.json` shows `"version": "1.3.7"`. After restart, open the **Light** entity — attributes should include `aux_key` (for example `aux1`).
 
 ### Local light probe (outside Home Assistant)
 

@@ -768,65 +768,144 @@ class TcxClient:
             return f"{self._user_id}|{uuid.uuid4().hex}"
         return uuid.uuid4().hex
 
+    async def _ws_close_quiet(self) -> None:
+        if self._ws_task is not None and not self._ws_task.done():
+            self._ws_task.cancel()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+        self._ws_task = None
+        if self._ws is not None and not self._ws.closed:
+            try:
+                await self._ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._ws = None
+
+    async def _ws_read_until_auth(self, *, timeout: float) -> bool:
+        """Read websocket messages inline until Authorization arrives."""
+        assert self._ws is not None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not self._ws_auth_event.is_set():
+            remaining = max(0.1, deadline - time.monotonic())
+            try:
+                msg = await asyncio.wait_for(self._ws.receive(), timeout=remaining)
+            except TimeoutError:
+                break
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    frame = json.loads(msg.data)
+                except json.JSONDecodeError:
+                    _LOGGER.debug("TCX WS non-JSON text: %s", msg.data[:200])
+                    continue
+                await self._handle_ws_frame(frame)
+            elif msg.type == aiohttp.WSMsgType.BINARY:
+                _LOGGER.debug("TCX WS binary frame (%d bytes)", len(msg.data or b""))
+            elif msg.type in (
+                aiohttp.WSMsgType.CLOSED,
+                aiohttp.WSMsgType.CLOSING,
+                aiohttp.WSMsgType.ERROR,
+            ):
+                _LOGGER.warning(
+                    "TCX WS closed during auth wait (type=%s close=%s)",
+                    msg.type,
+                    self._ws.close_code if self._ws else None,
+                )
+                break
+        return self._ws_auth_event.is_set()
+
     async def async_connect_ws(self, *, wait_for_auth: bool = True) -> None:
         if self.mock:
             return
-        freshly_connected = False
         async with self._ws_lock:
-            already_open = bool(self._ws and not self._ws.closed)
-            if not already_open:
-                await self._ensure_token()
+            if self._ws and not self._ws.closed and self._ws_auth_event.is_set():
+                return
+            if self._ws and not self._ws.closed and not wait_for_auth:
+                return
+
+            await self._ensure_token()
+            agents = (USER_AGENT_MOBILE, USER_AGENT, USER_AGENT_MOBILE)
+            last_error: Exception | None = None
+
+            for attempt, agent in enumerate(agents, start=1):
+                await self._ws_close_quiet()
                 self._ws_auth_event.clear()
                 self._ws_debug_frames.clear()
-                # Use the HA aiohttp session SSL context — never call
-                # ssl.create_default_context() on the event loop (blocking I/O).
-                headers = {
-                    "Authorization": self._id_token or "",
-                    "User-Agent": USER_AGENT_MOBILE,
-                }
-                self._ws = await self._session.ws_connect(
-                    WS_URL,
-                    headers=headers,
-                    heartbeat=30,
-                    autoping=True,
-                )
-                # Start the receiver BEFORE subscribe so the Authorization
-                # full-state push cannot be missed.
+                try:
+                    # Use the HA aiohttp session SSL context — never call
+                    # ssl.create_default_context() on the event loop.
+                    headers = {
+                        "Authorization": self._id_token or "",
+                        "User-Agent": agent,
+                    }
+                    self._ws = await self._session.ws_connect(
+                        WS_URL,
+                        headers=headers,
+                        heartbeat=20,
+                        autoping=True,
+                        max_msg_size=0,
+                    )
+                    subscribe = {
+                        "action": ACTION_SUBSCRIBE,
+                        "version": 1,
+                        "namespace": NAMESPACE_AUTHORIZATION,
+                        "service": SERVICE_AUTHORIZATION,
+                        "payload": {"userId": int(self._user_id or 0)},
+                        "target": self.serial,
+                    }
+                    await self._ws.send_json(subscribe)
+                    _LOGGER.info(
+                        "TCX WS subscribe sent (attempt %d/%d ua=%s)",
+                        attempt,
+                        len(agents),
+                        agent.split("/")[0],
+                    )
+
+                    if wait_for_auth:
+                        ok = await self._ws_read_until_auth(timeout=10.0)
+                        if ok:
+                            break
+                        _LOGGER.warning(
+                            "TCX WS auth not ready on attempt %d "
+                            "(%d frames, close=%s)",
+                            attempt,
+                            len(self._ws_debug_frames),
+                            self._ws.close_code if self._ws else None,
+                        )
+                        # Resubscribe once on the same socket if still open.
+                        if self._ws and not self._ws.closed:
+                            await self._ws.send_json(subscribe)
+                            if await self._ws_read_until_auth(timeout=8.0):
+                                break
+                    else:
+                        break
+                except Exception as err:  # noqa: BLE001
+                    last_error = err
+                    _LOGGER.warning("TCX WS connect attempt %d failed: %s", attempt, err)
+            else:
+                if wait_for_auth and not self._ws_auth_event.is_set():
+                    _LOGGER.error(
+                        "TCX websocket Authorization never arrived after retries "
+                        "(%d frames). Light/aux control will not work until the "
+                        "next successful websocket session.",
+                        len(self._ws_debug_frames),
+                    )
+                    if last_error is not None:
+                        raise TcxApiError(
+                            f"Websocket Authorization failed: {last_error}"
+                        ) from last_error
+
+            # Hand off ongoing reads to the background loop.
+            if self._ws and not self._ws.closed:
                 if self._ws_task is None or self._ws_task.done():
                     self._ws_task = asyncio.create_task(self._ws_receive_loop())
-                subscribe = {
-                    "action": ACTION_SUBSCRIBE,
-                    "version": 1,
-                    "namespace": NAMESPACE_AUTHORIZATION,
-                    "service": SERVICE_AUTHORIZATION,
-                    "payload": {"userId": int(self._user_id or 0)},
-                    "target": self.serial,
-                }
-                await self._ws.send_json(subscribe)
-                freshly_connected = True
-
-        # Authorization full-state carries aux/lights from pib0 + zig namespaces.
-        if wait_for_auth and freshly_connected and not self._ws_auth_event.is_set():
-            try:
-                await asyncio.wait_for(self._ws_auth_event.wait(), timeout=12.0)
-            except TimeoutError:
-                _LOGGER.warning(
-                    "TCX websocket Authorization state not received within 12s "
-                    "(%d frames seen)",
-                    len(self._ws_debug_frames),
-                )
-                for frame in self._ws_debug_frames[:8]:
-                    _LOGGER.warning(
-                        "WS frame sample: service=%s namespace=%s keys=%s",
-                        frame.get("service"),
-                        frame.get("namespace"),
-                        sorted((frame.get("payload") or {}).keys())
-                        if isinstance(frame.get("payload"), dict)
-                        else type(frame.get("payload")).__name__,
-                    )
 
     async def _ws_receive_loop(self) -> None:
         assert self._ws is not None
+        _LOGGER.debug("TCX WS receive loop started")
         try:
             async for msg in self._ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
@@ -839,6 +918,12 @@ class TcxClient:
                     aiohttp.WSMsgType.CLOSED,
                     aiohttp.WSMsgType.ERROR,
                 ):
+                    _LOGGER.warning(
+                        "TCX WS receive loop ending (type=%s close=%s err=%s)",
+                        msg.type,
+                        self._ws.close_code,
+                        self._ws.exception(),
+                    )
                     break
         except asyncio.CancelledError:
             raise
@@ -898,18 +983,18 @@ class TcxClient:
             or service == SERVICE_AUTHORIZATION
         ):
             # Prefer merging so a sparse auth frame cannot wipe REST keys.
-            self._reported = {**self._reported, **merged}
-            # Promote to "have auth" when we gained aux/light-bearing keys
-            # or the service explicitly says Authorization.
+            self._reported = _deep_merge(self._reported, merged)
+            # Only mark auth ready when useful device keys arrived — not on
+            # bare Authorization error frames.
             if (
-                service == SERVICE_AUTHORIZATION
-                or any(key.startswith("aux") for key in merged)
+                any(key.startswith("aux") for key in merged)
                 or "water" in merged
                 or "filt0" in merged
+                or "ecm0" in merged
             ):
                 self._ws_auth_event.set()
         else:
-            self._reported.update(merged)
+            self._reported = _deep_merge(self._reported, merged)
         self._notify()
 
     async def _send_command(
@@ -1113,13 +1198,4 @@ class TcxClient:
         )
 
     async def async_close(self) -> None:
-        if self._ws_task is not None:
-            self._ws_task.cancel()
-            try:
-                await self._ws_task
-            except asyncio.CancelledError:
-                pass
-            self._ws_task = None
-        if self._ws is not None and not self._ws.closed:
-            await self._ws.close()
-        self._ws = None
+        await self._ws_close_quiet()

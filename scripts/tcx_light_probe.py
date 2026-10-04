@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Probe Jandy TCX pool light discovery + on/off over the Zodiac cloud.
 
+By default this script TURNS THE POOL LIGHT ON after discovery succeeds.
+Use --off to turn it off, or --discover to only inspect state.
+
 Usage:
   export TCX_EMAIL='you@example.com'
   export TCX_PASSWORD='your-iaqualink-password'
@@ -99,6 +102,12 @@ async def _run(args: argparse.Namespace) -> int:
             serial=serial or None,
             mock=args.mock,
         )
+        if not args.discover:
+            print(
+                "Mode:",
+                "TURN LIGHT OFF" if args.off else "TURN LIGHT ON",
+                "(after websocket discovery)",
+            )
         print("Logging in…")
         await client.async_login()
         print("Login OK")
