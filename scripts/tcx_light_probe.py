@@ -26,9 +26,27 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import importlib.util  # noqa: E402
+
 import aiohttp  # noqa: E402
 
-from custom_components.jandy_tcx.api import TcxClient  # noqa: E402
+
+def _load_module(name: str, path: Path):
+    """Load a component module without importing homeassistant via __init__."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_COMPONENT = ROOT / "custom_components" / "jandy_tcx"
+# Preload const under the name api.py expects.
+_load_module("custom_components.jandy_tcx.const", _COMPONENT / "const.py")
+_api = _load_module("custom_components.jandy_tcx.api", _COMPONENT / "api.py")
+TcxClient = _api.TcxClient
 
 
 def _dump_aux(raw: dict) -> None:
